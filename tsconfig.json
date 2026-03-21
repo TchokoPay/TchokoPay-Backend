@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
-     "module": "ESNext",
-    "moduleResolution": "bundler",
+     "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "esModuleInterop": true,
     "resolvePackageJsonExports": true,

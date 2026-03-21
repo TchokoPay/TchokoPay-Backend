@@ -103,7 +103,12 @@ model UserContact {
   // Relations
   verificationCodes VerificationCode[]
 
-  @@unique([type, value]) // ensures no duplicate email/phone
+  // ✅ ENFORCE: ONE EMAIL + ONE PHONE PER USER
+  @@unique([userId, type])
+
+  // ✅ ENFORCE: VALUE MUST BE GLOBALLY UNIQUE
+  @@unique([value])
+
   @@index([userId])
 }
 
@@ -137,18 +142,41 @@ model Kyc {
   userId      String   @unique
   user        User     @relation(fields: [userId], references: [id])
 
-  documentUrl String
-  idNumber    String
-
   status      KycStatus @default(PENDING)
 
+  // 🧾 Identity Info
+  firstName   String?
+  lastName    String?
+  dateOfBirth DateTime?
+
+  // 📄 Documents
+  idType      String?   // National ID, Passport, Driver License
+  idNumber    String?
+  documentUrl String?   // Front
+  documentBackUrl String? // Back (optional)
+
+  selfieUrl   String?   // Selfie with ID (important)
+
+  // 🧠 Verification Metadata
   submittedAt DateTime @default(now())
   reviewedAt  DateTime?
+
+  reviewedBy  String?  // adminId
+
+  rejectionReason String?
+
+  // 📊 Risk & Scoring (future-proof)
+  riskScore   Int?     @default(0)
+
+  // 📱 Device / Geo tracking
+  ipAddress   String?
+  userAgent   String?
+
+  metadata    Json?
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
-
 /**
  * =====================================================
  * WALLET MODULE

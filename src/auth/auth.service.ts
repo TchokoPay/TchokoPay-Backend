@@ -1,8 +1,8 @@
 import {
-    Injectable,
-    BadRequestException,
-    UnauthorizedException,
-    Logger,
+  Injectable,
+  BadRequestException,
+  UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 
 import { PrismaService } from '../../prisma/prisma.service.js';
@@ -16,373 +16,329 @@ import { VerifyDto } from './dto/verify.dto.js';
 
 import { GoogleAuthService } from '../google/google-auth.service.js';
 import { generateTokens } from './utils/tokens.js';
+import { OtpService } from '../otp/otp.service.js';
 
 @Injectable()
 export class AuthService {
-    private readonly logger = new Logger(AuthService.name);
+  private readonly logger = new Logger(AuthService.name);
 
-    constructor(
-        private prisma: PrismaService,
-        private jwtService: JwtService,
-        private googleAuth: GoogleAuthService,
-    ) {}
+  constructor(
+    private prisma: PrismaService,
+    private jwtService: JwtService,
+    private googleAuth: GoogleAuthService,
+    private otpService: OtpService,
+  ) {}
 
-    // =========================
-    // 🔐 OTP GENERATION
-    // =========================
-    private generateOtp(): string {
-        return Math.floor(100000 + Math.random() * 900000).toString();
+  // =====================================================
+  // 🚀 SIGNUP (STRICT INDUSTRY STANDARD)
+  // =====================================================
+  async signup(dto: SignupDto) {
+    const { email, phone, password, firstName, lastName } = dto;
+
+    // ✅ Must provide exactly ONE identifier
+    if ((email && phone) || (!email && !phone)) {
+      throw new BadRequestException(
+        'Provide either email OR phone (not both)',
+      );
     }
 
-    private async checkOtpRateLimit(contactId: string) {
-        const lastOtp = await this.prisma.verificationCode.findFirst({
-            where: { contactId },
-            orderBy: { createdAt: 'desc' },
-        });
+    const identifier = email || phone;
+    const type = email ? 'EMAIL' : 'PHONE';
 
-        if (lastOtp) {
-            const diff = Date.now() - new Date(lastOtp.createdAt).getTime();
+    this.logger.log(`Signup attempt: ${identifier}`);
 
-            if (diff < 60 * 1000) {
-                this.logger.warn(`OTP rate limit hit for contact: ${contactId}`);
-                throw new BadRequestException(
-                    'Please wait before requesting another OTP',
-                );
-            }
-        }
+    // 🚨 GLOBAL UNIQUENESS CHECK
+    const existingContact = await this.prisma.userContact.findFirst({
+      where: { value: identifier },
+    });
+
+    if (existingContact) {
+      throw new BadRequestException(
+        'Email or phone already in use',
+      );
     }
 
-    private async sendOtp(contactId: string) {
-        await this.checkOtpRateLimit(contactId);
+    const hashedPassword = await bcrypt.hash(password, 12);
 
-        const code = this.generateOtp();
+    // 🧑 Create user
+    const user = await this.prisma.user.create({
+      data: {
+        firstName,
+        lastName,
+        password: hashedPassword,
+      },
+    });
 
-        this.logger.log(`OTP generated for contact ${contactId}: ${code}`);
+    // 📱 Create PRIMARY contact
+    const contact = await this.prisma.userContact.create({
+      data: {
+        userId: user.id,
+        type,
+        value: identifier,
+        isPrimary: true,
+        isVerified: false,
+      },
+    });
 
-        await this.prisma.verificationCode.create({
-            data: {
-                contactId,
-                code,
-                expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-            },
-        });
+    // 🔐 Send OTP
+    await this.otpService.sendOtp(contact.id);
+
+    this.logger.log(`User created: ${user.id}`);
+
+    // 🚨 DO NOT ISSUE FULL ACCESS YET (STRICT)
+    return {
+      message: 'OTP sent. Please verify to activate account.',
+      contactId: contact.id,
+    };
+  }
+
+  // =====================================================
+  // ✅ VERIFY OTP (ACTIVATE ACCOUNT)
+  // =====================================================
+  async verifyOtp(dto: VerifyDto) {
+    const { identifier, code } = dto;
+
+    const contact = await this.prisma.userContact.findFirst({
+      where: { value: identifier },
+    });
+
+    if (!contact) {
+      throw new BadRequestException('Contact not found');
     }
 
-    // =========================
-    // 🚀 SIGNUP
-    // =========================
-    async signup(dto: SignupDto) {
-        const { email, phone, password, firstName, lastName } = dto;
-
-        if (!email && !phone) {
-            throw new BadRequestException('Email or phone is required');
-        }
-
-        const value = email ?? phone!;
-
-        this.logger.log(`Signup attempt for: ${value}`);
-
-        const existingContact = await this.prisma.userContact.findFirst({
-            where: { value },
-        });
-
-        if (existingContact) {
-            this.logger.warn(`User already exists: ${value}`);
-            throw new BadRequestException('User already exists');
-        }
-
-        const hashedPassword = await bcrypt.hash(password, 12);
-
-        const user = await this.prisma.user.create({
-            data: {
-                firstName,
-                lastName,
-                password: hashedPassword,
-            },
-        });
-
-        const contact = await this.prisma.userContact.create({
-            data: {
-                userId: user.id,
-                type: email ? 'EMAIL' : 'PHONE',
-                value,
-                isPrimary: true,
-                isVerified: false,
-            },
-        });
-
-        await this.sendOtp(contact.id);
-
-        this.logger.log(`User created successfully: ${user.id}`);
-
-        const tokens = await generateTokens(
-            this.jwtService,
-            user.id,
-            value,
-        );
-
-        const hashedRefreshToken = await bcrypt.hash(
-            tokens.refreshToken,
-            10,
-        );
-
-        await this.prisma.user.update({
-            where: { id: user.id },
-            data: {
-                refreshToken: hashedRefreshToken,
-            },
-        });
-
-        return {
-            ...tokens,
-            user: {
-                id: user.id,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                email: email || null,
-                phone: phone || null,
-            },
-        };
+    if (contact.isVerified) {
+      return { message: 'Already verified' };
     }
 
-    // =========================
-    // 🔁 RESEND OTP
-    // =========================
-    async resendOtp(identifier: string) {
-        this.logger.log(`Resend OTP for: ${identifier}`);
+    // 🔐 Validate OTP
+    await this.otpService.verifyOtp(contact.id, code);
 
-        const contact = await this.prisma.userContact.findFirst({
-            where: { value: identifier },
-        });
+    // ✅ Mark verified
+    await this.prisma.userContact.update({
+      where: { id: contact.id },
+      data: { isVerified: true },
+    });
 
-        if (!contact) {
-            throw new BadRequestException('Contact not found');
-        }
+    this.logger.log(`Contact verified: ${contact.value}`);
 
-        if (contact.isVerified) {
-            throw new BadRequestException('Already verified');
-        }
+    // 🎟 Issue tokens AFTER verification
+    const tokens = await generateTokens(
+      this.jwtService,
+      contact.userId,
+      contact.value,
+    );
 
-        await this.sendOtp(contact.id);
+    return {
+      message: 'Account verified successfully',
+      ...tokens,
+    };
+  }
 
-        return { message: 'OTP resent successfully' };
+  // =====================================================
+  // 🔑 LOGIN (STRICT VERIFICATION REQUIRED)
+  // =====================================================
+  async login(dto: LoginDto) {
+    const { identifier, password } = dto;
+
+    const contact = await this.prisma.userContact.findFirst({
+      where: { value: identifier },
+      include: { user: true },
+    });
+
+    if (!contact || !contact.user) {
+      throw new UnauthorizedException('Invalid credentials');
     }
 
-    // =========================
-    // ✅ VERIFY OTP
-    // =========================
-    async verifyOtp(dto: VerifyDto) {
-        const { identifier, code } = dto;
-
-        this.logger.log(`OTP verification for: ${identifier}`);
-
-        const contact = await this.prisma.userContact.findFirst({
-            where: { value: identifier },
-        });
-
-        if (!contact) {
-            throw new BadRequestException('Contact not found');
-        }
-
-        const otp = await this.prisma.verificationCode.findFirst({
-            where: {
-                contactId: contact.id,
-                code,
-            },
-            orderBy: { createdAt: 'desc' },
-        });
-
-        if (!otp) {
-            throw new BadRequestException('Invalid code');
-        }
-
-        if (otp.expiresAt < new Date()) {
-            throw new BadRequestException('Code expired');
-        }
-
-        await this.prisma.userContact.update({
-            where: { id: contact.id },
-            data: { isVerified: true },
-        });
-
-        this.logger.log(`OTP verified successfully: ${identifier}`);
-
-        return { message: 'Verification successful' };
+    // 🚨 MUST BE VERIFIED
+    if (!contact.isVerified) {
+      throw new UnauthorizedException(
+        'Account not verified. Please verify OTP first.',
+      );
     }
 
-    // =========================
-    // 🔑 LOGIN
-    // =========================
-    async login(dto: LoginDto) {
-        const { identifier, password } = dto;
+    const isMatch = await bcrypt.compare(
+      password,
+      contact.user.password,
+    );
 
-        this.logger.log(`Login attempt: ${identifier}`);
-
-        const contact = await this.prisma.userContact.findFirst({
-            where: { value: identifier },
-            include: { user: true },
-        });
-
-        if (!contact || !contact.user) {
-            throw new UnauthorizedException('Invalid credentials');
-        }
-
-        if (!contact.isVerified) {
-            throw new UnauthorizedException('Please verify your account');
-        }
-
-        const user = contact.user;
-
-        if (!user.password) {
-            throw new UnauthorizedException('Invalid account setup');
-        }
-
-        const isMatch = await bcrypt.compare(password, user.password);
-
-        if (!isMatch) {
-            throw new UnauthorizedException('Invalid credentials');
-        }
-
-        const tokens = await generateTokens(
-            this.jwtService,
-            user.id,
-            identifier,
-        );
-
-        const hashedRefreshToken = await bcrypt.hash(
-            tokens.refreshToken,
-            10,
-        );
-
-        await this.prisma.user.update({
-            where: { id: user.id },
-            data: {
-                refreshToken: hashedRefreshToken,
-            },
-        });
-
-        this.logger.log(`Login successful: ${user.id}`);
-
-        return tokens;
+    if (!isMatch) {
+      throw new UnauthorizedException('Invalid credentials');
     }
 
-    // =========================
-    // 🌐 GOOGLE LOGIN
-    // =========================
-    async googleLogin(token: string) {
-        this.logger.log(`Google login attempt`);
+    const tokens = await generateTokens(
+      this.jwtService,
+      contact.user.id,
+      identifier,
+    );
 
-        const googleUser = await this.googleAuth.verifyGoogleToken(token);
+    const hashedRefreshToken = await bcrypt.hash(
+      tokens.refreshToken,
+      10,
+    );
 
-        if (!googleUser.googleId) {
-            throw new UnauthorizedException('Invalid Google user');
-        }
+    await this.prisma.user.update({
+      where: { id: contact.user.id },
+      data: { refreshToken: hashedRefreshToken },
+    });
 
-        let user = await this.prisma.user.findUnique({
-            where: { googleId: googleUser.googleId },
-        });
+    return tokens;
+  }
 
-        if (!user) {
-            this.logger.log(`Creating new Google user: ${googleUser.email}`);
+  // =====================================================
+  // 🔁 ADD NEW CONTACT (AFTER LOGIN ONLY)
+  // =====================================================
+  async addContact(userId: string, identifier: string) {
+    const existing = await this.prisma.userContact.findFirst({
+      where: { value: identifier },
+    });
 
-            user = await this.prisma.user.create({
-                data: {
-                    firstName: googleUser.firstName || 'Google',
-                    lastName: googleUser.lastName || 'User',
-                    googleId: googleUser.googleId,
-                },
-            });
-        }
-
-        const tokens = await generateTokens(
-            this.jwtService,
-            user.id,
-            googleUser.email!,
-        );
-
-        const hashedRefreshToken = await bcrypt.hash(
-            tokens.refreshToken,
-            10,
-        );
-
-        await this.prisma.user.update({
-            where: { id: user.id },
-            data: {
-                refreshToken: hashedRefreshToken,
-            },
-        });
-
-        this.logger.log(`Google login successful: ${user.id}`);
-
-        return {
-            ...tokens,
-            user: {
-                id: user.id,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                email: googleUser.email,
-                googleId: user.googleId,
-            },
-        };
+    if (existing) {
+      throw new BadRequestException(
+        'Contact already exists in system',
+      );
     }
 
-    // =========================
-    // 🔁 REFRESH TOKEN
-    // =========================
-    async refreshTokens(userId: string, refreshToken: string) {
-        this.logger.log(`Refreshing tokens for user: ${userId}`);
+    const type = identifier.includes('@') ? 'EMAIL' : 'PHONE';
 
-        const user = await this.prisma.user.findUnique({
-            where: { id: userId },
-        });
+    const contact = await this.prisma.userContact.create({
+      data: {
+        userId,
+        type,
+        value: identifier,
+        isPrimary: false,
+        isVerified: false,
+      },
+    });
 
-        if (!user || !user.refreshToken) {
-            throw new UnauthorizedException('Access denied');
-        }
+    // 🔐 Send OTP
+    await this.otpService.sendOtp(contact.id);
 
-        const isMatch = await bcrypt.compare(
-            refreshToken,
-            user.refreshToken,
-        );
+    return {
+      message: 'Verification OTP sent to new contact',
+      contactId: contact.id,
+    };
+  }
 
-        if (!isMatch) {
-            throw new UnauthorizedException('Invalid refresh token');
-        }
+  // =====================================================
+  // ⭐ SET PRIMARY CONTACT
+  // =====================================================
+  async setPrimary(userId: string, contactId: string) {
+    const contact = await this.prisma.userContact.findFirst({
+      where: { id: contactId, userId },
+    });
 
-        const tokens = await generateTokens(
-            this.jwtService,
-            user.id,
-            user.id,
-        );
-
-        const hashedRefreshToken = await bcrypt.hash(
-            tokens.refreshToken,
-            10,
-        );
-
-        await this.prisma.user.update({
-            where: { id: user.id },
-            data: {
-                refreshToken: hashedRefreshToken,
-            },
-        });
-
-        return tokens;
+    if (!contact || !contact.isVerified) {
+      throw new BadRequestException('Invalid contact');
     }
 
-    // =========================
-    // 🚪 LOGOUT
-    // =========================
-    async logout(userId: string) {
-        this.logger.log(`Logout user: ${userId}`);
+    await this.prisma.userContact.updateMany({
+      where: { userId },
+      data: { isPrimary: false },
+    });
 
-        await this.prisma.user.update({
-            where: { id: userId },
-            data: {
-                refreshToken: null,
-            },
-        });
+    await this.prisma.userContact.update({
+      where: { id: contactId },
+      data: { isPrimary: true },
+    });
 
-        return { message: 'Logged out successfully' };
+    return { message: 'Primary contact updated' };
+  }
+
+  // =====================================================
+  // 🌐 GOOGLE LOGIN
+  // =====================================================
+  async googleLogin(token: string) {
+    const googleUser = await this.googleAuth.verifyGoogleToken(token);
+
+    let user = await this.prisma.user.findUnique({
+      where: { googleId: googleUser.googleId },
+    });
+
+    if (!user) {
+      user = await this.prisma.user.create({
+        data: {
+          firstName: googleUser.firstName || 'Google',
+          lastName: googleUser.lastName || 'User',
+          googleId: googleUser.googleId,
+        },
+      });
     }
+
+    const tokens = await generateTokens(
+      this.jwtService,
+      user.id,
+      googleUser.email!,
+    );
+
+    const hashedRefreshToken = await bcrypt.hash(
+      tokens.refreshToken,
+      10,
+    );
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken: hashedRefreshToken },
+    });
+
+    return {
+      ...tokens,
+      user: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+      },
+    };
+  }
+
+  // =====================================================
+  // 🔁 REFRESH TOKENS
+  // =====================================================
+  async refreshTokens(userId: string, refreshToken: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user || !user.refreshToken) {
+      throw new UnauthorizedException('Access denied');
+    }
+
+    const isMatch = await bcrypt.compare(
+      refreshToken,
+      user.refreshToken,
+    );
+
+    if (!isMatch) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const tokens = await generateTokens(
+      this.jwtService,
+      user.id,
+      userId,
+    );
+
+    const hashedRefreshToken = await bcrypt.hash(
+      tokens.refreshToken,
+      10,
+    );
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken: hashedRefreshToken },
+    });
+
+    return tokens;
+  }
+
+  // =====================================================
+  // 🚪 LOGOUT
+  // =====================================================
+  async logout(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { refreshToken: null },
+    });
+
+    return { message: 'Logged out successfully' };
+  }
 }

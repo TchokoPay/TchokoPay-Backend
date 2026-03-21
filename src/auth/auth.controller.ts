@@ -15,9 +15,12 @@ import {
 } from '@nestjs/swagger';
 
 import { AuthService } from './auth.service.js';
+
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { VerifyDto } from './dto/verify.dto.js';
+
+import { Public } from './decorators/public.decorator.js';
 
 import type { Request, Response } from 'express';
 
@@ -27,52 +30,43 @@ export class AuthController {
   constructor(private authService: AuthService) {}
 
   // =========================
-  // 📝 SIGNUP
+  // 📝 SIGNUP (OTP REQUIRED)
   // =========================
+  @Public()
   @Post('signup')
-  @ApiOperation({ summary: 'Create a new user account' })
+  @ApiOperation({
+    summary:
+      'Signup with email OR phone. OTP required before login.',
+  })
   @ApiBody({ type: SignupDto })
-  signup(@Body() dto: SignupDto) {
+  async signup(@Body() dto: SignupDto) {
     return this.authService.signup(dto);
   }
 
   // =========================
-  // 🔁 RESEND OTP
+  // ✅ VERIFY OTP (ACTIVATION)
   // =========================
-  @Post('resend-otp')
-  @ApiOperation({ summary: 'Resend OTP code' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        identifier: {
-          type: 'string',
-          example: '670000321',
-        },
-      },
-      required: ['identifier'],
-    },
-  })
-  resendOtp(@Body('identifier') identifier: string) {
-    return this.authService.resendOtp(identifier);
-  }
-
-  // =========================
-  // ✅ VERIFY OTP
-  // =========================
+  @Public()
   @Post('verify')
-  @ApiOperation({ summary: 'Verify OTP code' })
+  @ApiOperation({
+    summary:
+      'Verify OTP to activate account and get access token',
+  })
   @ApiBody({ type: VerifyDto })
-  verify(@Body() dto: VerifyDto) {
+  async verify(@Body() dto: VerifyDto) {
     return this.authService.verifyOtp(dto);
   }
 
   // =========================
-  // 🔐 LOGIN
+  // 🔐 LOGIN (ONLY VERIFIED USERS)
   // =========================
+  @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login user' })
+  @ApiOperation({
+    summary:
+      'Login with verified email or phone',
+  })
   @ApiBody({ type: LoginDto })
   async login(
     @Body() dto: LoginDto,
@@ -82,7 +76,7 @@ export class AuthController {
 
     res.cookie('refreshToken', tokens.refreshToken, {
       httpOnly: true,
-      secure: true, // set false in development
+      secure: true, // set false in dev
       sameSite: 'strict',
       path: '/auth/refresh',
     });
@@ -95,9 +89,12 @@ export class AuthController {
   // =========================
   // 🌐 GOOGLE LOGIN
   // =========================
+  @Public()
   @Post('google')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with Google' })
+  @ApiOperation({
+    summary: 'Login with Google',
+  })
   @ApiBody({
     schema: {
       type: 'object',
@@ -132,16 +129,19 @@ export class AuthController {
   // =========================
   // 🔁 REFRESH TOKEN
   // =========================
+  @Public()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Refresh access token' })
+  @ApiOperation({
+    summary: 'Refresh access token',
+  })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
         userId: {
           type: 'string',
-          example: 'user-id-here',
+          example: 'user-id',
         },
       },
       required: ['userId'],
@@ -178,16 +178,19 @@ export class AuthController {
   // =========================
   // 🚪 LOGOUT
   // =========================
+  @Public()
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Logout user' })
+  @ApiOperation({
+    summary: 'Logout user',
+  })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
         userId: {
           type: 'string',
-          example: 'user-id-here',
+          example: 'user-id',
         },
       },
       required: ['userId'],
