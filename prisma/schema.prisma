@@ -1,0 +1,253 @@
+/**
+ * =====================================================
+ * GENERATOR & DATASOURCE
+ * =====================================================
+ */
+generator client {
+  provider = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/**
+ * =====================================================
+ * ENUMS
+ * =====================================================
+ */
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  PAYMENT
+  INVOICE
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum ContactType {
+  EMAIL
+  PHONE
+}
+
+/**
+ * =====================================================
+ * USER MODULE (CORE IDENTITY)
+ * =====================================================
+ */
+model User {
+  id          String   @id @default(uuid())
+
+  password    String?
+
+  firstName   String
+  lastName    String
+  // ✅ NEW FIELD
+  profilePicture String?
+
+  isActive    Boolean  @default(true)
+
+  kycStatus   KycStatus @default(PENDING)
+
+  googleId    String?   @unique
+
+  refreshToken String?  // ✅ ADD THIS
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  contacts    UserContact[]
+
+  wallet      Wallet?
+  transactions Transaction[]
+  kyc         Kyc?
+  paymentRequests PaymentRequest[]
+
+  @@index([googleId])
+}
+
+/**
+ * =====================================================
+ * CONTACT SYSTEM (EMAIL / PHONE)
+ * =====================================================
+ */
+model UserContact {
+  id          String   @id @default(uuid())
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type        ContactType
+  value       String
+
+  isPrimary   Boolean  @default(false)
+  isVerified  Boolean  @default(false)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  verificationCodes VerificationCode[]
+
+  @@unique([type, value]) // ensures no duplicate email/phone
+  @@index([userId])
+}
+
+/**
+ * =====================================================
+ * VERIFICATION (OTP SYSTEM)
+ * =====================================================
+ */
+model VerificationCode {
+  id          String   @id @default(uuid())
+
+  contactId   String
+  contact     UserContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  code        String
+  expiresAt   DateTime
+
+  createdAt   DateTime @default(now())
+
+  @@index([contactId])
+}
+
+/**
+ * =====================================================
+ * KYC MODULE
+ * =====================================================
+ */
+model Kyc {
+  id          String   @id @default(uuid())
+
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+
+  documentUrl String
+  idNumber    String
+
+  status      KycStatus @default(PENDING)
+
+  submittedAt DateTime @default(now())
+  reviewedAt  DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/**
+ * =====================================================
+ * WALLET MODULE
+ * =====================================================
+ */
+model Wallet {
+  id              String   @id @default(uuid())
+
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+
+  currency        String   @default("XAF")
+
+  totalProcessed  Decimal  @default(0)
+  totalVolume     Decimal  @default(0)
+  totalFeesEarned Decimal  @default(0)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  transactions    Transaction[]
+}
+
+/**
+ * =====================================================
+ * TRANSACTION MODULE
+ * =====================================================
+ */
+model Transaction {
+  id              String   @id @default(uuid())
+
+  type            TransactionType
+  status          TransactionStatus @default(PENDING)
+
+  amount          Decimal
+  currency        String
+
+  exchangeRate    Decimal?
+  fee             Decimal?
+  netAmount       Decimal?
+
+  reference       String   @unique
+
+  externalRef     String?
+  provider        String?
+
+  idempotencyKey  String?   @unique
+
+  senderId        String?
+  receiverId      String?
+
+  walletId        String
+  wallet          Wallet   @relation(fields: [walletId], references: [id])
+
+  userId          String?
+  user            User? @relation(fields: [userId], references: [id])
+
+  ipAddress       String?
+  userAgent       String?
+  channel         String?
+
+  providerStatus  String?
+
+  metadata        Json?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([walletId])
+  @@index([status])
+  @@index([reference])
+  @@index([externalRef])
+  @@index([userId])
+}
+
+/**
+ * =====================================================
+ * PAYMENT MODULE
+ * =====================================================
+ */
+model PaymentRequest {
+  id          String   @id @default(uuid())
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+
+  amount      Decimal
+  currency    String
+
+  status      TransactionStatus @default(PENDING)
+
+  paymentLink String?
+
+  expiresAt   DateTime
+
+  metadata    Json?
+
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}

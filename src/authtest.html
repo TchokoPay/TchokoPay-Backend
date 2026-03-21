@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Google Token Test</title>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<div id="buttonDiv"></div>
+
+<script>
+  window.onload = function () {
+    google.accounts.id.initialize({
+      client_id: "532889102081-nuc1hq41i2k5f3fo5s3riu2gjtd0foud.apps.googleusercontent.com",
+      callback: handleCredentialResponse,
+    });
+
+    google.accounts.id.renderButton(
+      document.getElementById("buttonDiv"),
+      { theme: "outline", size: "large" }
+    );
+  };
+
+  function handleCredentialResponse(response) {
+    console.log("ID TOKEN:", response.credential);
+    alert("Check console for ID Token");
+  }
+</script>
+
+</body>
+</html>
