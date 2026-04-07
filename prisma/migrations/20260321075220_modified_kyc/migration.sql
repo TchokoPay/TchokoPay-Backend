@@ -1,0 +1,15 @@
+-- AlterTable
+ALTER TABLE "Kyc" ADD COLUMN     "dateOfBirth" TIMESTAMP(3),
+ADD COLUMN     "documentBackUrl" TEXT,
+ADD COLUMN     "firstName" TEXT,
+ADD COLUMN     "idType" TEXT,
+ADD COLUMN     "ipAddress" TEXT,
+ADD COLUMN     "lastName" TEXT,
+ADD COLUMN     "metadata" JSONB,
+ADD COLUMN     "rejectionReason" TEXT,
+ADD COLUMN     "reviewedBy" TEXT,
+ADD COLUMN     "riskScore" INTEGER DEFAULT 0,
+ADD COLUMN     "selfieUrl" TEXT,
+ADD COLUMN     "userAgent" TEXT,
+ALTER COLUMN "documentUrl" DROP NOT NULL,
+ALTER COLUMN "idNumber" DROP NOT NULL;

@@ -1,0 +1,1075 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { PrismaService } from '../../../prisma/prisma.service.js';
+import { PaymentProvider } from './base/payment-provider.interface.js';
+import { PayinDto, PayoutDto } from './base/types.js';
+
+export type NetwalletpayMethod =
+  | 'MOBILE_MONEY'
+  | 'CARD'
+  | 'BANK'
+  | 'NETWALLET_PAY'
+  | 'CRYPTO';
+
+export type NetwalletpayCountry =
+  | 'UG' | 'KE' | 'TZ' | 'RW' | 'BI' | 'GH' | 'CM' | 'EG'
+  | 'ZA' | 'NG' | 'ZM' | 'US' | 'GB' | 'EU';
+
+interface NetwalletpayConfig {
+  primaryKey: string;
+  secondaryKey: string;
+  email: string;
+  baseUrl: string;
+  webhookBaseUrl?: string;
+  webhookSecret?: string;
+}
+
+interface AccessTokenResponse {
+  access_token: string;
+  expires_in: number;
+}
+
+@Injectable()
+export class NetwalletpayProvider implements PaymentProvider {
+  private readonly logger = new Logger(NetwalletpayProvider.name);
+  private config: NetwalletpayConfig;
+  private accessToken: string | null = null;
+  private tokenExpiry: Date | null = null;
+
+  private supportedMap: Partial<Record<NetwalletpayCountry, Set<NetwalletpayMethod>>> = {};
+  private countryCurrencyMap: Partial<Record<NetwalletpayCountry, string>> = {};
+  private countryDialCodeMap: Partial<Record<NetwalletpayCountry, string>> = {};
+  private countryDataMap: Partial<Record<NetwalletpayCountry, { id: string; name: string; iso2: string; dialCode: string; currencyCode: string }>> = {};
+
+  constructor(
+    private configService: ConfigService,
+    private prisma: PrismaService,
+  ) {
+    this.config = {
+      primaryKey: this.configService.get<string>('NETWALLETPAY_PRIMARY_KEY', ''),
+      secondaryKey: this.configService.get<string>('NETWALLETPAY_SECONDARY_KEY', ''),
+      email: this.configService.get<string>('NETWALLETPAY_EMAIL', ''),
+      baseUrl: this.normalizeBaseUrl(this.configService.get<string>('NETWALLETPAY_BASE_URL', 'https://netwalletpay.com')),
+      webhookBaseUrl: this.configService.get<string>('NETWALLETPAY_WEBHOOK_BASE_URL', 'https://your-domain.com'),
+      webhookSecret: this.configService.get<string>('NETWALLETPAY_WEBHOOK_SECRET'),
+    };
+
+    // Validate required configuration
+    if (!this.config.primaryKey || !this.config.secondaryKey || !this.config.email) {
+      this.logger.error('❌ Netwalletpay configuration incomplete. Required: NETWALLETPAY_PRIMARY_KEY, NETWALLETPAY_SECONDARY_KEY, NETWALLETPAY_EMAIL');
+    }
+
+    this.logger.log('🚀 Netwalletpay Provider initialized', {
+      baseUrl: this.config.baseUrl,
+      email: this.config.email,
+      primaryKeyLength: this.config.primaryKey?.length,
+      secondaryKeyLength: this.config.secondaryKey?.length,
+    });
+
+    // Load dynamic provider/country data into memory for fast checks
+    this.loadProviderMetadata().catch(error => {
+      this.logger.warn('⚠️ Could not load provider metadata at startup', error);
+    });
+  }
+
+  private normalizeBaseUrl(url: string): string {
+    return (url || 'https://netwalletpay.com').trim().replace(/\/+$/, '');
+  }
+
+  /**
+   * Load all provider metadata and country info from database
+   */
+  private async loadProviderMetadata(): Promise<void> {
+    try {
+      this.logger.log('🌱 Loading Netwalletpay provider metadata from DB');
+      
+      // Load all active countries with their currency info
+      const countries = await this.prisma.country.findMany({
+        where: { isActive: true },
+        include: { currency: true },
+      });
+      
+      for (const country of countries) {
+        const countryCode = country.iso2 as NetwalletpayCountry;
+        this.countryDataMap[countryCode] = {
+          id: country.id,
+          name: country.name,
+          iso2: country.iso2,
+          dialCode: country.dialCode || '',
+          currencyCode: country.currency?.code || 'USD',
+        };
+        this.countryCurrencyMap[countryCode] = country.currency?.code || 'USD';
+        this.countryDialCodeMap[countryCode] = country.dialCode || '';
+      }
+      
+      // Load all active providers with their supported methods
+      const providers = await this.prisma.paymentProvider.findMany({
+        where: { isActive: true, country: { isActive: true }, method: { isActive: true } },
+        include: { country: true, method: true },
+      });
+
+      for (const provider of providers) {
+        const countryCode = provider.country.iso2 as NetwalletpayCountry;
+        const methodCode = provider.method.code as NetwalletpayMethod;
+
+        if (!this.supportedMap[countryCode]) {
+          this.supportedMap[countryCode] = new Set();
+        }
+        this.supportedMap[countryCode].add(methodCode);
+      }
+      
+      this.logger.log(`✅ Loaded ${countries.length} countries and ${providers.length} providers`);
+    } catch (error) {
+      this.logger.error('❌ Failed to load provider metadata:', error);
+    }
+  }
+
+  async payin(data: PayinDto): Promise<any> {
+    const { amount, currency, reference, phone, metadata } = data;
+
+    // Extract country and method from metadata
+    const country = metadata?.country as NetwalletpayCountry;
+    const method = this.mapMethod(metadata?.method);
+
+    this.logger.log(`🔄 Netwalletpay PAYIN: ${method} in ${country} - ${amount} ${currency} to ${phone}`);
+
+    try {
+      // Get provider information first
+      const providerInfo = await this.getProviderInfo('COLLECTION', method, country);
+      const providerId = providerInfo.id;
+      const methodType = providerInfo.methodType || this.getMethodType(country, method, providerId);
+
+      // Format phone number with country code
+      const formattedPhone = phone ? await this.formatPhoneNumber(phone, country) : phone;
+
+      this.logger.log(`📌 PAYIN Configuration:`, {
+        country,
+        method,
+        methodType,
+        providerId,
+        providerName: providerInfo.name,
+        amount: Number(amount), // Keep decimal precision for accurate amounts
+        currency,
+        phone,
+        formattedPhone,
+      });
+
+      // Build collection request payload using API spec parameter names
+      const payload: any = {
+        CurrencyCode: currency,
+        OrderID: reference.replace('INV-', ''), // Use just the numeric part of the reference
+        Amount: Number(amount), // Keep decimal precision for accurate amounts
+        Method: method,
+        CountryCode: country,
+        MethodProvider: providerId,
+        PhoneNumber: formattedPhone, // Use formatted phone with country code
+        Description: `Payment for ${reference}`,
+        CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`, // Add callback URL for status updates
+      };
+
+      // Add MethodType only for MOBILE_MONEY method in Cameroon
+      if (method === 'MOBILE_MONEY' && country === 'CM') {
+        payload.MethodType = methodType;
+      }
+
+      this.logger.log(`💲 PAYIN Request Payload:`, payload);
+      this.logger.log(`📱 Formatted phone: ${phone} → ${formattedPhone}`);
+      this.logger.log(`🆔 OrderID: ${reference} → ${reference.replace('INV-', '')}`);
+
+      // Validate required parameters
+      const requiredParams = ['CurrencyCode', 'OrderID', 'Amount', 'Method', 'CountryCode', 'MethodProvider', 'PhoneNumber'];
+      const missingParams = requiredParams.filter(param => !payload[param]);
+      if (missingParams.length > 0) {
+        const error = `Missing required parameters: ${missingParams.join(', ')}`;
+        this.logger.error(`❌ PAYIN Validation Error: ${error}`, payload);
+        throw new Error(error);
+      }
+
+      const response = await this.postWithMethodProviderFallback(
+        '/api/v1/global/collection/request-payment',
+        payload
+      );
+
+      this.logger.log(`✅ PAYIN Success:`, {
+        transactionId: response.data,
+        statusCode: response.statusCode,
+        message: response.message,
+      });
+
+      return {
+        status: 'SUCCESS',
+        transactionId: response.data,
+        provider: providerInfo.name,
+        method: method,
+        country: country,
+      };
+    } catch (error) {
+      this.logger.error(`❌ Netwalletpay PAYIN failed:`, error);
+      return {
+        status: 'FAILED',
+        error: (error as Error).message,
+      };
+    }
+  }
+
+  /**
+   * Payout (Disbursement) - We pay out to customer
+   */
+  async payout(data: PayoutDto): Promise<any> {
+    const { amount, currency, phone, reference, metadata } = data;
+
+    const country = metadata?.country as NetwalletpayCountry;
+    const method = this.mapMethod(metadata?.method);
+
+    this.logger.log(`💸 Netwalletpay PAYOUT: ${method} in ${country} - ${amount} ${currency} to ${phone}`);
+
+    try {
+      // Get provider information first
+      const providerInfo = await this.getProviderInfo('PAYOUT', method, country);
+      const providerId = providerInfo?.methodProviderId || providerInfo?.id || 'mtn_cm';
+      const methodType = this.getMethodType(country, method, providerInfo?.id);
+      
+      // Format phone number with country code
+      const formattedPhone = phone ? await this.formatPhoneNumber(phone, country) : phone;
+
+      this.logger.log(`📌 PAYOUT Configuration:`, {
+        country,
+        method,
+        methodType,
+        providerId,
+        methodProviderId: providerInfo?.methodProviderId,
+        providerName: providerInfo?.name,
+        amount: Number(amount), // Keep decimal precision for accurate amounts
+        currency,
+        phone,
+        formattedPhone,
+      });
+
+      // Build payout request payload using API spec parameter names
+      const payload: any = {
+        CurrencyCode: currency,
+        OrderID: reference.replace('INV-', ''), // Use just the numeric part of the reference
+        Amount: Number(amount), // Keep decimal precision for accurate amounts
+        Method: method,
+        CountryCode: country,
+        MethodProvider: providerId,
+        PhoneNumber: formattedPhone, // Use formatted phone with country code
+        Description: `Payout for ${reference}`,
+        CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`, // Add callback URL for status updates
+      };
+
+      // Add MethodType only for MOBILE_MONEY method
+      if (methodType && method === 'MOBILE_MONEY') {
+        payload.MethodType = methodType;
+      }
+
+      this.logger.log(`💲 PAYOUT Request Payload:`, payload);
+      this.logger.log(`📱 Formatted phone: ${phone} → ${formattedPhone}`);
+      this.logger.log(`🆔 OrderID: ${reference} → ${reference.replace('INV-', '')}`);
+
+      // Validate required parameters
+      const requiredParams = ['CurrencyCode', 'OrderID', 'Amount', 'Method', 'CountryCode', 'MethodProvider', 'PhoneNumber'];
+      const missingParams = requiredParams.filter(param => !payload[param]);
+      if (missingParams.length > 0) {
+        const error = `Missing required parameters: ${missingParams.join(', ')}`;
+        this.logger.error(`❌ PAYOUT Validation Error: ${error}`, payload);
+        throw new Error(error);
+      }
+
+      const response = await this.postWithMethodProviderFallback(
+        '/api/v1/global/payout/request-transfer',
+        payload
+      );
+
+      this.logger.log(`✅ PAYOUT Success:`, {
+        transactionId: response.data,
+        statusCode: response.statusCode,
+        message: response.message,
+      });
+    } catch (error) {
+      this.logger.error(`❌ Netwalletpay PAYOUT failed:`, error);
+      return {
+        status: 'FAILED',
+        error: (error as Error).message,
+      };
+    }
+  }
+
+  /**
+   * Verify provider configuration by querying Netwalletpay API
+   * This is useful for debugging and testing the integration
+   */
+  async verifyProviderConfig(paymentType: 'COLLECTION' | 'PAYOUT', method: string, country: string): Promise<any> {
+    try {
+      const endpoint = `/api/v1/lookup/get-providers/${paymentType}/${method}/${country}`;
+      this.logger.log(`🔍 Verifying provider config: ${endpoint}`);
+
+      const response = await this.makeApiRequest('GET', endpoint);
+
+      const result = {
+        status: 'SUCCESS',
+        endpoint,
+        paymentType,
+        method,
+        country,
+        providersCount: Array.isArray(response.data) ? response.data.length : 0,
+        providers: response.data || [],
+        message: response.message,
+      };
+
+      this.logger.log(`✅ Provider verification successful:`, result);
+      return result;
+    } catch (error) {
+      this.logger.error(`❌ Provider verification failed:`, error);
+      return {
+        status: 'FAILED',
+        error: (error as Error).message,
+        paymentType,
+        method,
+        country,
+      };
+    }
+  }
+
+  /**
+   * Get supported countries from database
+   */
+  async getSupportedCountries(): Promise<any[]> {
+    try {
+      this.logger.log('🌍 Fetching supported countries from database');
+      
+      const countries = await this.prisma.country.findMany({
+        where: { isActive: true },
+        include: { currency: true },
+      });
+
+      const result = countries.map(c => ({
+        countryCode: c.iso2,
+        currencyCode: c.currency?.code || 'USD',
+        countryName: c.name,
+        dialCode: c.dialCode,
+      }));
+
+      this.logger.log(`✅ Retrieved ${result.length} active countries from database`);
+      return result;
+    } catch (error) {
+      this.logger.error('❌ Failed to get supported countries:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get provider information for country and method
+   */
+  private async getProviderInfo(paymentType: 'COLLECTION' | 'PAYOUT', method: NetwalletpayMethod, country: NetwalletpayCountry): Promise<any> {
+    try {
+      // First try the dynamic DB configuration so provider selection is data-driven
+      const dbProvider = await this.getProviderFromDb(country, method);
+      if (dbProvider) {
+        this.logger.log(`🔍 Using DB provider config for ${country}/${method}`, { dbProvider });
+        return dbProvider;
+      }
+
+      // Fallback to external API call when no DB config exists
+      const endpoint = `/api/v1/lookup/get-providers/${paymentType}/${method}/${country}`;
+      this.logger.log(`🔍 Fetching provider info from Netwalletpay API:`, { endpoint, paymentType, method, country });
+
+      const response = await this.makeApiRequest('GET', endpoint);
+
+      this.logger.log(`✅ Provider lookup response:`, {
+        statusCode: response.statusCode,
+        dataType: Array.isArray(response.data) ? 'array' : typeof response.data,
+        dataLength: Array.isArray(response.data) ? response.data.length : 'N/A',
+        providersData: response.data,
+        message: response.message,
+      });
+
+      const providers = response.data || [];
+      if (providers.length === 0) {
+        this.logger.warn(`No providers found for ${paymentType}/${method}/${country}, using default`);
+        return await this.getDefaultProvider(country, method);
+      }
+
+      let selectedProvider = this.selectBestProvider(providers, country, paymentType, method);
+      selectedProvider.methodType = (method === 'MOBILE_MONEY' && country === 'CM')
+        ? this.getMethodTypeForProvider(selectedProvider.id)
+        : '';
+      selectedProvider.providerName = selectedProvider.name;
+
+      // upsert to DB for next time
+      await this.upsertProviderToDb(country, method, selectedProvider);
+
+      this.logger.log(`🎯 Selected provider for ${paymentType}:`, selectedProvider);
+      return selectedProvider;
+    } catch (error) {
+      this.logger.error(`❌ Failed to get provider info for ${paymentType}/${method}/${country}:`, error);
+      return await this.getDefaultProvider(country, method);
+    }
+  }
+
+  /**
+   * Select the best provider based on country, payment type, and method
+   */
+  private selectBestProvider(providers: any[], country: NetwalletpayCountry, paymentType: string, method: NetwalletpayMethod): any {
+    // For Cameroon mobile money, prefer providers in this order
+    if (country === 'CM' && method === 'MOBILE_MONEY') {
+      if (paymentType === 'PAYOUT') {
+        // For payout, prefer MTN first (most reliable), then Orange, then others
+        return providers.find((p: any) => p.id === 'mtn_cm') ||
+               providers.find((p: any) => p.id === 'orange_cm') ||
+               providers.find((p: any) => p.id === 'eu_cm') ||
+               providers.find((p: any) => p.id === 'netwallet_cm') ||
+               providers[0];
+      } else {
+        // For collection, prefer MTN first, then Orange, then EU, then others
+        return providers.find((p: any) => p.id === 'mtn_cm') ||
+               providers.find((p: any) => p.id === 'orange_cm') ||
+               providers.find((p: any) => p.id === 'eu_cm') ||
+               providers.find((p: any) => p.id === 'netwallet_cm') ||
+               providers[0];
+      }
+    }
+
+    // For other countries, use the first available provider
+    return providers[0];
+  }
+
+  /**
+   * Get MethodType for a specific provider ID
+   */
+  private getMethodTypeForProvider(providerId: string): string {
+    const normalizedId = providerId?.toLowerCase() || '';
+
+    // Netwalletpay doc specifies MethodType values: MOMO, ORANGE_MONEY, EU
+    if (normalizedId.includes('mtn')) {
+      return 'MOMO'; // MTN uses MOMO method type
+    } else if (normalizedId.includes('orange')) {
+      return 'ORANGE_MONEY'; // Orange uses ORANGE_MONEY
+    } else if (normalizedId.includes('eu')) {
+      return 'EU';
+    } else if (normalizedId.includes('netwallet')) {
+      return 'MOMO'; // Default to MOMO for unknown providers
+    }
+
+    return 'MOMO'; // Default fallback for Cameroon mobile money
+  }
+
+  /**
+   * Get a list of fallback MethodType candidates for a provider ID.
+   */
+  private getMethodTypeCandidates(providerId: string): string[] {
+    const normalizedId = (providerId || '').toLowerCase();
+    const candidates: string[] = [];
+
+    // provider-specific method types with prioritized order per Netwalletpay docs
+    if (normalizedId.includes('mtn')) {
+      candidates.push('MOMO', 'momo', 'MOBILE_MONEY');
+    } else if (normalizedId.includes('orange')) {
+      candidates.push('ORANGE_MONEY', 'orange_money', 'MOMO');
+    } else if (normalizedId.includes('eu')) {
+      candidates.push('EU', 'MOMO');
+    } else if (normalizedId.includes('netwallet')) {
+      candidates.push('MOMO', 'NETWALLET_PAY');
+    }
+
+    // Add generic fallbacks
+    candidates.push('MOMO', 'MOBILE_MONEY', '');
+
+    // Remove duplicates keeping order
+    return Array.from(new Set(candidates));
+  }
+
+  /**
+   * Get default provider from database based on country and method
+   */
+  private async getDefaultProvider(country: NetwalletpayCountry, method: NetwalletpayMethod): Promise<any> {
+    try {
+      // Query DB for first available provider for this country/method
+      // Order by providerCode to ensure MTN (mtn_cm) is preferred when multiple providers exist
+      const provider = await this.prisma.paymentProvider.findFirst({
+        where: {
+          country: { iso2: country, isActive: true },
+          method: { code: method, isActive: true },
+          isActive: true,
+        },
+        include: {
+          country: { include: { currency: true } },
+          method: true,
+        },
+        orderBy: { providerCode: 'asc' }, // mtn_cm < orange_cm < eu_cm < netwallet_cm
+      });
+
+      if (provider) {
+        return {
+          id: provider.providerCode,
+          name: provider.name,
+          methodType: provider.requiresType ? method : '',
+          country,
+          transactionCurrency: provider.country.currency?.code || 'USD',
+        };
+      }
+
+      // If no provider found for this method, get any provider for the country (still ordered by code)
+      const anyProvider = await this.prisma.paymentProvider.findFirst({
+        where: {
+          country: { iso2: country, isActive: true },
+          isActive: true,
+        },
+        include: {
+          country: { include: { currency: true } },
+          method: true,
+        },
+        orderBy: { providerCode: 'asc' },
+      });
+
+      if (anyProvider) {
+        return {
+          id: anyProvider.providerCode,
+          name: anyProvider.name,
+          methodType: anyProvider.requiresType ? anyProvider.method.code : '',
+          country,
+          transactionCurrency: anyProvider.country.currency?.code || 'USD',
+        };
+      }
+
+      this.logger.warn(`No provider found in DB for ${country}/${method}`);
+      return {
+        id: 'mtn_cm',
+        name: 'MTN Mobile Money',
+        methodType: method === 'MOBILE_MONEY' ? 'MOMO' : '',
+        country,
+        transactionCurrency: await this.getCurrencyForCountry(country),
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get default provider for ${country}/${method}:`, error);
+      return {
+        id: 'mtn_cm',
+        name: 'MTN Mobile Money',
+        methodType: method === 'MOBILE_MONEY' ? 'MOMO' : '',
+        country,
+        transactionCurrency: 'USD',
+      };
+    }
+  }
+
+  /**
+   * Get currency for a country
+   */
+  private async getProviderFromDb(country: NetwalletpayCountry, method: NetwalletpayMethod): Promise<any | null> {
+    const mappedMethod = method === 'NETWALLET_PAY' ? 'NETWALLET_PAY' : method;
+
+    // Order by providerCode (asc) ensures MTN (mtn_cm) is selected first when multiple providers exist
+    const provider = await this.prisma.paymentProvider.findFirst({
+      where: {
+        country: {
+          iso2: country,
+          isActive: true,
+        },
+        method: {
+          code: mappedMethod,
+          isActive: true,
+        },
+        isActive: true,
+      },
+      include: {
+        country: {
+          include: {
+            currency: true,
+          },
+        },
+        method: true,
+      },
+      orderBy: { providerCode: 'asc' }, // Ensures mtn_cm is preferred
+    });
+
+    if (!provider) return null;
+
+    return {
+      id: provider.providerCode,
+      name: provider.name,
+      methodProviderId: provider.providerCode,
+      country: provider.country.iso2,
+      methodType: provider.requiresType ? this.getMethodTypeForProvider(provider.providerCode) : '',
+      transactionCurrency: provider.country.currency?.code || 'USD',
+    };
+  }
+
+  private async upsertProviderToDb(country: NetwalletpayCountry, method: NetwalletpayMethod, providerData: any) {
+    const currencyCode = this.countryCurrencyMap[country] || 'USD';
+    const dialCode = this.countryDialCodeMap[country] || '';
+
+    const currencyRecord = await this.prisma.currency.upsert({
+      where: { code: currencyCode },
+      update: {},
+      create: {
+        code: currencyCode,
+        name: currencyCode,
+        symbol: currencyCode,
+        decimals: ['BTC', 'ETH', 'USDT'].includes(currencyCode) ? 8 : 2,
+        isCrypto: ['BTC', 'ETH', 'USDT'].includes(currencyCode),
+      },
+    });
+
+    const countryRecord = await this.prisma.country.upsert({
+      where: { iso2: country },
+      update: { name: country, dialCode, isActive: true, currencyId: currencyRecord.id },
+      create: {
+        iso2: country,
+        name: country,
+        dialCode,
+        currency: {
+          connect: { id: currencyRecord.id },
+        },
+      },
+    });
+
+    const methodRecord = await this.prisma.paymentMethodRef.upsert({
+      where: { code: method },
+      update: { isActive: true },
+      create: { code: method, name: method },
+    });
+
+    await this.prisma.paymentProvider.upsert({
+      where: { providerCode: providerData.id },
+      update: {
+        name: providerData.name,
+        countryId: countryRecord.id,
+        methodId: methodRecord.id,
+        requiresType: !!providerData.methodType,
+        isActive: true,
+      },
+      create: {
+        providerCode: providerData.id,
+        name: providerData.name,
+        countryId: countryRecord.id,
+        methodId: methodRecord.id,
+        requiresType: !!providerData.methodType,
+      },
+    });
+
+    this.supportedMap[country] = this.supportedMap[country] || new Set();
+    this.supportedMap[country].add(method);
+    this.countryCurrencyMap[country] = currencyCode;
+    if (dialCode) this.countryDialCodeMap[country] = dialCode;
+  }
+
+  private async getCurrencyForCountry(country: NetwalletpayCountry): Promise<string> {
+    // Check memory cache first
+    const mapped = this.countryCurrencyMap[country];
+    if (mapped) {
+      return mapped;
+    }
+
+    // Fall back to DB query if not in cache
+    try {
+      const countryData = await this.prisma.country.findUnique({
+        where: { iso2: country },
+        include: { currency: true },
+      });
+      if (countryData?.currency?.code) {
+        this.countryCurrencyMap[country] = countryData.currency.code;
+        return countryData.currency.code;
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to fetch currency for ${country}:`, error);
+    }
+
+    return 'USD';
+  }
+
+  private async getCountryDialCode(country: NetwalletpayCountry): Promise<string> {
+    // Check memory cache first
+    const mapped = this.countryDialCodeMap[country];
+    if (mapped) {
+      return mapped;
+    }
+
+    // Fall back to DB query if not in cache
+    try {
+      const countryData = await this.prisma.country.findUnique({
+        where: { iso2: country },
+      });
+      if (countryData?.dialCode) {
+        this.countryDialCodeMap[country] = countryData.dialCode;
+        return countryData.dialCode;
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to fetch dial code for ${country}:`, error);
+    }
+
+    return '';
+  }
+
+  /**
+   * Get method-specific fields for API requests
+   */
+  private getMethodSpecificFields(method: NetwalletpayMethod, request: PayinDto | PayoutDto): any {
+    const baseFields: any = {};
+
+    switch (method) {
+      case 'MOBILE_MONEY':
+        // Mobile money requires phone number
+        if (request.phone) {
+          baseFields.phone = request.phone;
+        }
+        break;
+
+      case 'CARD':
+        // Card payments may require additional card details
+        // These would come from frontend tokenization
+        break;
+
+      case 'BANK':
+        // Bank transfers may require account details
+        break;
+
+      case 'CRYPTO':
+        // Crypto payments may require wallet address
+        break;
+
+      case 'NETWALLET_PAY':
+        // Netwallet Pay specific fields
+        break;
+    }
+
+    return baseFields;
+  }
+
+  /**
+   * Format phone number for API (ensure international format with country code)
+   */
+  private async formatPhoneNumber(phone: string, country: NetwalletpayCountry): Promise<string> {
+    if (!phone) return phone;
+
+    // Remove any existing + or spaces/dashes
+    let cleanPhone = phone.replace(/[\s+\-\(\)]/g, '');
+
+    // Get dial code from DB or cache
+    const dialCode = await this.getCountryDialCode(country);
+    const countryDigits = dialCode.replace('+', '');
+
+    // If it already starts with country code digits, ensure + prefix
+    if (cleanPhone.startsWith(countryDigits)) {
+      return '+' + cleanPhone;
+    }
+
+    // If it starts with 00 (international dialing), convert to +
+    if (cleanPhone.startsWith('00')) {
+      return '+' + cleanPhone.substring(2);
+    }
+
+    // If it starts with just the local number (no country code), add country code
+    // Remove leading 0 if present (common in African numbers)
+    if (cleanPhone.startsWith('0')) {
+      cleanPhone = cleanPhone.substring(1);
+    }
+
+    const formatted = dialCode + cleanPhone;
+
+    this.logger.log(`📱 Phone formatting: ${phone} → ${formatted} (country: ${country})`);
+    return formatted;
+  }
+
+  /**
+   * Map MethodType for each country-method combination (API spec requirement)
+   */
+  private getMethodType(country: NetwalletpayCountry, method: NetwalletpayMethod, providerId?: string): string {
+    // MethodType is only required for MOBILE_MONEY method in Cameroon
+    if (method !== 'MOBILE_MONEY' || country !== 'CM') {
+      return '';
+    }
+
+    // For Cameroon mobile money, MethodType depends on the provider network
+    const normalizedProvider = providerId?.toLowerCase() || '';
+
+    if (normalizedProvider.includes('mtn')) {
+      return 'MTN';
+    } else if (normalizedProvider.includes('orange')) {
+      return 'ORANGE';
+    } else if (normalizedProvider.includes('eu')) {
+      return 'EU';
+    } else if (normalizedProvider.includes('netwallet')) {
+      return 'NETWALLET';
+    }
+
+    return 'MTN'; // Default fallback
+  }
+
+  private getMethodProviderCandidates(currentProvider: string): string[] {
+    const normalized = currentProvider?.toLowerCase?.() || '';
+    const candidates = [currentProvider];
+
+    // Valid provider codes from database seed / Netwalletpay API
+    // Only try alternative codes, NOT provider names (names are not valid API values)
+    if (normalized === 'mtn_cm' || normalized === 'mtn') {
+      return [...new Set([...candidates, 'mtn_cm', 'mtn'])];
+    }
+    if (normalized === 'orange_cm' || normalized === 'orange') {
+      return [...new Set([...candidates, 'orange_cm', 'orange'])];
+    }
+    if (normalized === 'eu_cm' || normalized === 'eu') {
+      return [...new Set([...candidates, 'eu_cm', 'eu'])];
+    }
+    if (normalized === 'netwallet_cm' || normalized === 'netwallet') {
+      return [...new Set([...candidates, 'netwallet_cm', 'netwallet'])];
+    }
+
+    // For other providers, return the code as-is
+    return candidates;
+  }
+
+  private isRetryableError(error: unknown): boolean {
+    const message = (error as Error)?.message?.toLowerCase?.() || '';
+    return message.includes('4008') || message.includes('unsubscribe') || message.includes('method type');
+  }
+
+  private async postWithMethodProviderFallback(endpoint: string, basePayload: any): Promise<any> {
+    const providerCandidates = this.getMethodProviderCandidates(basePayload.MethodProvider);
+    let lastError: Error | null = null;
+    const requireSecret = endpoint.includes('/payout/');
+
+    for (const providerCandidate of providerCandidates) {
+      const methodTypeCandidates = (basePayload.Method === 'MOBILE_MONEY' && basePayload.CountryCode === 'CM')
+        ? this.getMethodTypeCandidates(providerCandidate)
+        : [''];
+
+      for (const methodTypeCandidate of methodTypeCandidates) {
+        const payload = {
+          ...basePayload,
+          MethodProvider: providerCandidate,
+          MethodType: methodTypeCandidate || undefined,
+        };
+
+        if (!payload.MethodType) {
+          delete payload.MethodType;
+        }
+
+        try {
+          return await this.makeApiRequest('POST', endpoint, payload, requireSecret);
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+
+          const isFinalProvider = providerCandidate === providerCandidates[providerCandidates.length - 1];
+          const isFinalMethodType = methodTypeCandidate === methodTypeCandidates[methodTypeCandidates.length - 1];
+
+          if (!this.isRetryableError(lastError) || (isFinalProvider && isFinalMethodType)) {
+            throw lastError;
+          }
+
+          this.logger.warn(`MethodProvider ${providerCandidate} + MethodType ${methodTypeCandidate || '<none>'} failed, trying next candidate`, {
+            error: lastError.message,
+            endpoint,
+            payload,
+          });
+        }
+      }
+    }
+
+    throw lastError || new Error('Unknown fallback error');
+  }
+
+  /**
+   * Map our internal methods to netwalletpay methods
+   */
+  private mapMethod(method: string): NetwalletpayMethod {
+    const normalized = method?.toUpperCase();
+
+    switch (normalized) {
+      case 'MOMO':
+      case 'ORANGE':
+        return 'MOBILE_MONEY';
+      case 'CARD':
+        return 'CARD';
+      case 'BANK':
+        return 'BANK';
+      case 'NETWALLET_PAY':
+        return 'NETWALLET_PAY';
+      case 'LIGHTNING':
+      case 'BTC':
+      case 'CRYPTO':
+        return 'CRYPTO';
+      default:
+        return 'MOBILE_MONEY'; // Default fallback
+    }
+  }
+
+  /**
+   * Check if country + method combination is supported
+   */
+  isSupported(country: string, method: string): boolean {
+    const countryCode = country.toUpperCase() as NetwalletpayCountry;
+    const netwalletpayMethod = this.mapMethod(method);
+
+    // Use the supportedMap populated from DB during init
+    if (this.supportedMap[countryCode]) {
+      return this.supportedMap[countryCode].has(netwalletpayMethod);
+    }
+
+    // If not in cache, it's not in the database either
+    this.logger.warn(`Country ${countryCode} not found in supported map`);
+    return false;
+  }
+
+  /**
+   * Get supported currencies for a country (from database cache populated on init)
+   */
+  getSupportedCurrencies(country: string): string[] {
+    const countryCode = country.toUpperCase() as NetwalletpayCountry;
+    const currency = this.countryCurrencyMap[countryCode];
+    return currency ? [currency] : [];
+  }
+
+  /**
+   * Get valid access token (fetch from API and cache for 15 minutes)
+   */
+  private async getAccessToken(): Promise<string> {
+    const now = new Date();
+
+    // Return cached token if still valid
+    if (this.accessToken && this.tokenExpiry && now < this.tokenExpiry) {
+      this.logger.log('♻️ Using cached access token');
+      return this.accessToken;
+    }
+
+    this.logger.log('🔐 Fetching new access token from API...');
+    this.logger.log('📋 Token Request Credentials:', {
+      email: this.config.email,
+      primaryKeyPrefix: this.config.primaryKey?.substring(0, 10) + '...',
+      primaryKeyLength: this.config.primaryKey?.length,
+      grantType: 'primary_key',
+    });
+
+    try {
+      // Prepare form-urlencoded body
+      const formData = new URLSearchParams();
+      formData.append('primary_key', this.config.primaryKey);
+      formData.append('email', this.config.email);
+      formData.append('grant_type', 'primary_key');
+
+      this.logger.log('📤 Token Request Body:', formData.toString());
+
+      const response = await fetch(`${this.config.baseUrl}/api/v1/token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+        },
+        body: formData.toString(),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.logger.error(`❌ Failed to get access token: ${response.status}`, {
+          status: response.status,
+          statusText: response.statusText,
+          body: errorText,
+          email: this.config.email,
+          primaryKeyPrefix: this.config.primaryKey?.substring(0, 10) + '...',
+        });
+        throw new Error(`Token fetch failed: ${response.status} - ${errorText}`);
+      }
+
+      const data: AccessTokenResponse = await response.json();
+      this.logger.log('✅ Access token obtained', {
+        expiresIn: data.expires_in,
+        tokenLength: data.access_token.length,
+      });
+
+      // Cache token for expires_in seconds minus 30 second buffer
+      this.accessToken = data.access_token;
+      this.tokenExpiry = new Date(now.getTime() + (data.expires_in - 30) * 1000);
+
+      return this.accessToken;
+    } catch (error) {
+      this.logger.error('🔗 Error fetching access token:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Make authenticated API request with Bearer token
+   */
+  private async makeApiRequest(
+    method: 'GET' | 'POST',
+    endpoint: string,
+    data?: any,
+    requireSecret: boolean = false
+  ): Promise<any> {
+    const token = await this.getAccessToken();
+    const url = `${this.config.baseUrl}${endpoint}`;
+
+    // Use Bearer token format as per API spec
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    };
+
+    // Add secret key for payout requests if needed
+    if (requireSecret && this.config.secondaryKey) {
+      headers['X-Secret-Key'] = this.config.secondaryKey;
+    }
+
+    const requestOptions: RequestInit = {
+      method,
+      headers,
+    };
+
+    if (data && method === 'POST') {
+      requestOptions.body = JSON.stringify(data);
+    }
+
+    this.logger.log(`📡 Netwalletpay API ${method} ${url}`, {
+      endpoint,
+      hasData: !!data,
+      requiresSecret: requireSecret,
+    });
+
+    if (data) {
+      this.logger.log(`   Request payload:`, data);
+    }
+
+    try {
+      const response = await fetch(url, requestOptions);
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        let parsedError;
+        try {
+          parsedError = JSON.parse(errorData);
+        } catch {
+          parsedError = { message: errorData };
+        }
+
+        this.logger.error(`❌ API Error ${response.status}:`, {
+          status: response.status,
+          statusText: response.statusText,
+          contentType: response.headers.get('content-type'),
+          errorCode: parsedError.errorCode || parsedError.code,
+          errorMessage: parsedError.message,
+          fullBody: errorData.substring(0, 1000),
+          url,
+          method,
+          requestPayload: data,
+        });
+
+        throw new Error(`API request failed: ${response.status} - ${parsedError.message || errorData}`);
+      }
+
+      const responseData = await response.json();
+      this.logger.log(`✅ API Response:`, {
+        statusCode: responseData.statusCode,
+        dataLength: JSON.stringify(responseData.data).length,
+        hasMessage: !!responseData.message,
+      });
+
+      return responseData;
+    } catch (error) {
+      this.logger.error(`🔗 Fetch error:`, {
+        message: (error as Error).message,
+        endpoint,
+        method,
+      });
+      throw error;
+    }
+  }
+}

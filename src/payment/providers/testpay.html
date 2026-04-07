@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Payment WebSocket Test</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>Payment Status Updates</h1>
+    <div id="messages"></div>
+    
+    <script>
+        const socket = io('http://localhost:3000/payments');
+        
+        socket.on('connect', () => {
+            console.log('✅ Connected to WebSocket');
+            // Replace with your actual user ID from JWT token
+            socket.emit('joinUserRoom', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiNmY3NzU0Ny01YTU0LTQzNWEtYjc1Ni1lMDI3NTYzMjA2MWYiLCJpZGVudGlmaWVyIjoiNjcwNjU0MzIxIiwiaWF0IjoxNzc0NDI1Nzc4LCJleHAiOjE3NzQ0MjY2Nzh9.buV8Y5qDUMMAqpZbDCY_9GOmN3BOZxvh7BfRJOdYdMg');
+            document.getElementById('messages').innerHTML += 
+                '<p>🔗 Connected to payment notifications</p>';
+        });
+        
+        socket.on('paymentUpdate', (data) => {
+            console.log('💰 Payment update:', data);
+            document.getElementById('messages').innerHTML += 
+                `<p>📢 ${new Date().toLocaleTimeString()}: ${JSON.stringify(data, null, 2)}</p>`;
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('❌ Disconnected from WebSocket');
+            document.getElementById('messages').innerHTML += 
+                '<p>🔌 Disconnected from payment notifications</p>';
+        });
+    </script>
+</body>
+</html>

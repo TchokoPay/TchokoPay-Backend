@@ -1,0 +1,13 @@
+/* eslint-disable prettier/prettier */
+import { Module } from '@nestjs/common';
+import { PaymentIdentityService } from './payment-identity.service.js';
+import { PaymentIdentityController } from './payment-identity.controller.js';
+import { PrismaModule } from '../../prisma/prisma.module.js';
+
+@Module({
+  imports: [PrismaModule],
+  controllers: [PaymentIdentityController],
+  providers: [PaymentIdentityService],
+  exports: [PaymentIdentityService],
+})
+export class PaymentIdentityModule {}

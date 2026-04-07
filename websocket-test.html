@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Payment WebSocket Test</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>Payment Status Updates</h1>
+    <div id="messages"></div>
+
+    <script>
+        // Replace with your actual user ID from the JWT token
+        const userId = 'b6f77547-5a54-435a-b756-e0275632061f'; // From your logs
+
+        // Connect with userId as query parameter
+        const socket = io('http://localhost:3000/payments', {
+            query: { userId: userId }
+        });
+
+        socket.on('connect', () => {
+            console.log('✅ Connected to WebSocket with user:', userId);
+            document.getElementById('messages').innerHTML +=
+                `<p>🔗 Connected as user: ${userId}</p>`;
+        });
+
+        socket.on('payment:complete', (data) => {
+            console.log('💰 Payment update:', data);
+            document.getElementById('messages').innerHTML +=
+                `<p>📢 ${new Date().toLocaleTimeString()}: ${JSON.stringify(data, null, 2)}</p>`;
+        });
+
+        socket.on('disconnect', () => {
+            console.log('❌ Disconnected from WebSocket');
+            document.getElementById('messages').innerHTML +=
+                '<p>🔌 Disconnected from payment notifications</p>';
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+            document.getElementById('messages').innerHTML +=
+                `<p>❌ Connection error: ${error.message}</p>`;
+        });
+    </script>
+</body>
+</html></content>
+<parameter name="filePath">c:\TchokoPay\tchokopay-backend\websocket-test.html

@@ -3,8 +3,9 @@
  * GENERATOR & DATASOURCE
  * =====================================================
  */
+
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
   engineType = "library"
 }
 
@@ -17,12 +18,41 @@ datasource db {
  * ENUMS
  * =====================================================
  */
+
 enum TransactionType {
   DEPOSIT
   WITHDRAWAL
   TRANSFER
   PAYMENT
   INVOICE
+}
+
+enum QuoteAmountType {
+  PAY      // User controls what they spend
+  RECEIVE  // User controls what recipient gets
+}
+
+enum PaymentFlow {
+  DIRECT
+  QR
+  REQUEST
+}
+
+
+enum PaymentMethod {
+  BTC
+  LIGHTNING
+  MOMO
+  ORANGE
+  CARD
+  BANK
+}
+
+enum PayoutMethod {
+  MOMO
+  ORANGE
+  BANK
+  CRYPTO
 }
 
 enum TransactionStatus {
@@ -33,15 +63,26 @@ enum TransactionStatus {
   CANCELLED
 }
 
+enum LedgerEntryType {
+  CREDIT
+  DEBIT
+}
+
 enum KycStatus {
   PENDING
   VERIFIED
   REJECTED
 }
-
 enum ContactType {
   EMAIL
   PHONE
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  REJECTED
 }
 
 /**
@@ -49,33 +90,30 @@ enum ContactType {
  * USER MODULE (CORE IDENTITY)
  * =====================================================
  */
+
 model User {
-  id          String   @id @default(uuid())
+  id             String    @id @default(uuid())
+  password       String?
+  firstName      String
+  lastName       String
+  profilePicture String? // NEW FIELD
+  isActive       Boolean   @default(true)
+  kycStatus      KycStatus @default(PENDING)
+  googleId       String?   @unique
+  refreshToken   String? // ADD THIS
 
-  password    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  firstName   String
-  lastName    String
-  // ✅ NEW FIELD
-  profilePicture String?
-
-  isActive    Boolean  @default(true)
-
-  kycStatus   KycStatus @default(PENDING)
-
-  googleId    String?   @unique
-
-  refreshToken String?  // ✅ ADD THIS
-
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-
-  contacts    UserContact[]
-
-  wallet      Wallet?
-  transactions Transaction[]
-  kyc         Kyc?
+  contacts        UserContact[]
+  wallets         Wallet[]
+  transactions    Transaction[]
+  kyc             Kyc?
   paymentRequests PaymentRequest[]
+
+  paymentIdentity   PaymentIdentity? // 👈 NEW
+  recipientInvoices PaymentInvoice[] @relation("RecipientInvoices")
+  createdInvoices   PaymentInvoice[] @relation("CreatedInvoices")
 
   @@index([googleId])
 }
@@ -85,30 +123,24 @@ model User {
  * CONTACT SYSTEM (EMAIL / PHONE)
  * =====================================================
  */
+
 model UserContact {
-  id          String   @id @default(uuid())
+  id         String      @id @default(uuid())
+  userId     String
+  type       ContactType
+  value      String
+  isPrimary  Boolean     @default(false)
+  isVerified Boolean     @default(false)
 
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  type        ContactType
-  value       String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  isPrimary   Boolean  @default(false)
-  isVerified  Boolean  @default(false)
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  // Relations
   verificationCodes VerificationCode[]
 
-  // ✅ ENFORCE: ONE EMAIL + ONE PHONE PER USER
   @@unique([userId, type])
-
-  // ✅ ENFORCE: VALUE MUST BE GLOBALLY UNIQUE
   @@unique([value])
-
   @@index([userId])
 }
 
@@ -117,16 +149,16 @@ model UserContact {
  * VERIFICATION (OTP SYSTEM)
  * =====================================================
  */
+
 model VerificationCode {
-  id          String   @id @default(uuid())
+  id        String   @id @default(uuid())
+  contactId String
+  code      String
+  expiresAt DateTime
 
-  contactId   String
-  contact     UserContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
 
-  code        String
-  expiresAt   DateTime
-
-  createdAt   DateTime @default(now())
+  contact UserContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
   @@index([contactId])
 }
@@ -136,69 +168,222 @@ model VerificationCode {
  * KYC MODULE
  * =====================================================
  */
+
 model Kyc {
-  id          String   @id @default(uuid())
+  id     String    @id @default(uuid())
+  userId String    @unique
+  status KycStatus @default(PENDING)
 
-  userId      String   @unique
-  user        User     @relation(fields: [userId], references: [id])
-
-  status      KycStatus @default(PENDING)
-
-  // 🧾 Identity Info
+  // Identity Info
   firstName   String?
   lastName    String?
   dateOfBirth DateTime?
 
-  // 📄 Documents
-  idType      String?   // National ID, Passport, Driver License
-  idNumber    String?
-  documentUrl String?   // Front
-  documentBackUrl String? // Back (optional)
+  // Documents
+  idType          String?
+  idNumber        String?
+  documentUrl     String?
+  documentBackUrl String?
+  selfieUrl       String?
 
-  selfieUrl   String?   // Selfie with ID (important)
-
-  // 🧠 Verification Metadata
-  submittedAt DateTime @default(now())
-  reviewedAt  DateTime?
-
-  reviewedBy  String?  // adminId
-
+  // Metadata
+  submittedAt     DateTime  @default(now())
+  reviewedAt      DateTime?
+  reviewedBy      String?
   rejectionReason String?
 
-  // 📊 Risk & Scoring (future-proof)
-  riskScore   Int?     @default(0)
+  // Risk & Scoring
+  riskScore Int? @default(0)
 
-  // 📱 Device / Geo tracking
-  ipAddress   String?
-  userAgent   String?
+  // Device / Geo
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
 
-  metadata    Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id])
 }
+
+/**
+ * =====================================================
+ * Currency MODULE
+ * =====================================================
+ */
+model Currency {
+  id String @id @default(uuid())
+
+  code String @unique // XAF, USD, BTC, ETH, USDT
+  name String
+
+  symbol String?
+
+  decimals Int // 2 for fiat, 8 for BTC
+  isCrypto Boolean @default(false)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  wallets Wallet[]
+
+  transactions Transaction[]
+
+  paymentInvoices PaymentInvoice[]
+
+  paymentAttempts PaymentAttempt[]
+
+  quotes Quote[] @relation("BaseCurrency")
+
+  quotesAsTarget Quote[] @relation("TargetCurrency")
+
+  countries Country[]
+}
+
+model Country {
+  id          String   @id @default(uuid())
+  iso2        String   @unique
+  name        String
+  dialCode    String?
+  currencyId  String
+  currency    Currency @relation(fields: [currencyId], references: [id])
+  isActive    Boolean  @default(true)
+
+  providers   PaymentProvider[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PaymentMethodRef {
+  id       String  @id @default(uuid())
+  code     String  @unique
+  name     String
+  isActive Boolean @default(true)
+
+  providers PaymentProvider[]
+}
+
+model PaymentProvider {
+  id            String           @id @default(uuid())
+  providerCode  String           @unique
+  name          String
+  countryId     String
+  country       Country          @relation(fields: [countryId], references: [id])
+  methodId      String
+  method        PaymentMethodRef @relation(fields: [methodId], references: [id])
+  requiresType  Boolean          @default(false)
+  isActive      Boolean          @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * =====================================================
+ * QUOTE MODULE
+ * =====================================================
+ */
+
+model Quote {
+  id String @id @default(uuid())
+
+  baseCurrencyId String
+  baseCurrency   Currency @relation("BaseCurrency", fields: [baseCurrencyId], references: [id])
+
+  targetCurrencyId String
+  targetCurrency   Currency @relation("TargetCurrency", fields: [targetCurrencyId], references: [id])
+
+
+  baseAmount   Decimal
+  targetAmount Decimal
+
+  exchangeRate Decimal?
+  fee         Decimal?
+  rateSource  String?
+  
+  amountType QuoteAmountType
+  
+  paymentMethod PaymentMethod
+  payoutMethod  PayoutMethod
+  
+  flow PaymentFlow
+  
+  expiresAt DateTime
+  isUsed    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  
+  transactions Transaction[]
+  invoices     PaymentInvoice[]
+
+  @@index([baseCurrencyId])
+  @@index([targetCurrencyId])
+  @@index([amountType])
+}
+
+/**
+ * =====================================================
+ * FEE CONFIGURATION (DYNAMIC PRICING)
+ * =====================================================
+ */
+model FeeConfig {
+  id String @id @default(uuid())
+
+  // 🎯 MATCHING CONDITIONS
+  baseCurrencyCode   String? // BTC
+  targetCurrencyCode String? // XAF
+  paymentMethod      String? // payer side (BTC, MOMO, CARD)
+  flow               String? // INVOICE, PAYOUT, QR
+  payoutMethod String? // receiver side (MOMO, ORANGE)
+
+  // 💰 PRICING
+  feePercent    Decimal @default(0)
+  spreadPercent Decimal @default(0)
+
+  // 🔒 CONTROL
+  isActive Boolean @default(true)
+  priority Int     @default(0) // higher = more specific
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([baseCurrencyCode])
+  @@index([targetCurrencyCode])
+  @@index([paymentMethod])
+  @@index([flow])
+}
+
 /**
  * =====================================================
  * WALLET MODULE
  * =====================================================
  */
+
 model Wallet {
-  id              String   @id @default(uuid())
+  id     String @id @default(uuid())
+  userId String
 
-  userId          String   @unique
-  user            User     @relation(fields: [userId], references: [id])
-
-  currency        String   @default("XAF")
-
+  currencyId      String
+  currency        Currency @relation(fields: [currencyId], references: [id])
   totalProcessed  Decimal  @default(0)
   totalVolume     Decimal  @default(0)
   totalFeesEarned Decimal  @default(0)
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  // Relations
-  transactions    Transaction[]
+  user User @relation(fields: [userId], references: [id])
+
+  transactions Transaction[]
+  ledgers      Ledger[]
+
+  @@unique([userId, currencyId])
+  @@index([userId])
+  @@index([currencyId])
 }
 
 /**
@@ -206,45 +391,62 @@ model Wallet {
  * TRANSACTION MODULE
  * =====================================================
  */
+
 model Transaction {
-  id              String   @id @default(uuid())
+  id String @id @default(uuid())
 
-  type            TransactionType
-  status          TransactionStatus @default(PENDING)
+  type   TransactionType
+  status TransactionStatus @default(PENDING)
 
-  amount          Decimal
-  currency        String
+  quoteId String?
+  quote   Quote?  @relation(fields: [quoteId], references: [id])
 
-  exchangeRate    Decimal?
-  fee             Decimal?
-  netAmount       Decimal?
+  amount     Decimal
+  currencyId String
+  currency   Currency @relation(fields: [currencyId], references: [id])
 
-  reference       String   @unique
+  exchangeRate Decimal?
+  fee          Decimal?
+  netAmount    Decimal?
 
-  externalRef     String?
-  provider        String?
+  baseCurrencyId   String?
+  targetCurrencyId String?
 
-  idempotencyKey  String?   @unique
+  baseAmount   Decimal?
+  targetAmount Decimal?
 
-  senderId        String?
-  receiverId      String?
+  rateSource    String?
+  rateTimestamp DateTime?
 
-  walletId        String
-  wallet          Wallet   @relation(fields: [walletId], references: [id])
+  paymentStatus String?
+  payoutStatus  String?
 
-  userId          String?
-  user            User? @relation(fields: [userId], references: [id])
+  reference      String  @unique
+  externalRef    String?
+  provider       String?
+  idempotencyKey String? @unique
 
-  ipAddress       String?
-  userAgent       String?
-  channel         String?
+  senderId   String?
+  receiverId String?
 
-  providerStatus  String?
+  walletId String
+  wallet   Wallet @relation(fields: [walletId], references: [id])
 
-  metadata        Json?
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  ipAddress      String?
+  userAgent      String?
+  channel        String?
+  providerStatus String?
+  metadata       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  refunds       Refund[]
+  disputes      Dispute[]
+  ledgerEntries Ledger[]
 
   @@index([walletId])
   @@index([status])
@@ -258,24 +460,356 @@ model Transaction {
  * PAYMENT MODULE
  * =====================================================
  */
+
 model PaymentRequest {
-  id          String   @id @default(uuid())
+  id     String @id @default(uuid())
+  userId String
 
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
-
-  amount      Decimal
-  currency    String
-
-  status      TransactionStatus @default(PENDING)
+  amount   Decimal
+  currency String
+  status   TransactionStatus @default(PENDING)
 
   paymentLink String?
-
-  expiresAt   DateTime
-
+  expiresAt   DateTime?
   metadata    Json?
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
+}
+
+/**
+ * =====================================================
+ * PAYMENT IDENTITY (PUBLIC HANDLE)
+ * =====================================================
+ */
+model PaymentIdentity {
+  id String @id @default(uuid())
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  handle String @unique // @tchoko-brian, @tchoko-brian1
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([handle])
+}
+
+/**
+ * =====================================================
+ * PAYMENT INVOICE (CORE ENGINE)
+ * =====================================================
+ */
+model PaymentInvoice {
+  id String @id @default(uuid())
+
+  reference String @unique
+
+  amount     Decimal
+  currencyId String
+  currency   Currency @relation(fields: [currencyId], references: [id])
+
+  quoteId String?
+  quote   Quote?  @relation(fields: [quoteId], references: [id])
+
+  description String
+
+  country String
+
+  paymentMethod PaymentMethod? // how payer will pay (null for REQUEST CREATE until paid)
+  flow          PaymentFlow? // DIRECT, QR, REQUEST
+
+  // Who receives payment (USER ONLY or external phone)
+  recipientId String?
+  recipient   User?   @relation("RecipientInvoices", fields: [recipientId], references: [id])
+
+  recipientPhone String?
+  recipientName  String?
+
+  payoutMethod String // MOMO, ORANGE, etc.
+
+  status TransactionStatus @default(PENDING)
+
+  expiresAt DateTime
+
+  createdById String? // optional (payer)
+  createdBy   User?   @relation("CreatedInvoices", fields: [createdById], references: [id])
+
+  paymentLink PaymentLink?
+
+  attempts PaymentAttempt[]
+  payout   Payout?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ledgerEntries Ledger[]
+
+  @@index([recipientId])
+  @@index([status])
+  @@index([reference])
+  @@index([currencyId])
+}
+
+/**
+ * =====================================================
+ * PAYMENT ATTEMPT (MULTI-PROVIDER FLOW)
+ * =====================================================
+ */
+model PaymentAttempt {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   PaymentInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  method PaymentMethod
+
+  flow PaymentFlow? // DIRECT, QR, REQUEST
+
+  status TransactionStatus @default(PENDING)
+
+  fee Decimal?
+
+  netAmount Decimal?
+
+  provider String
+
+  externalRef String?
+
+  amount     Decimal
+  currencyId String
+  currency   Currency @relation(fields: [currencyId], references: [id])
+
+  idempotencyKey String?
+
+  failureReason    String?
+  providerResponse Json?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([status])
+}
+
+/**
+ * =====================================================
+ * WEBHOOK EVENTS (IDEMPOTENCY)
+ * =====================================================
+ */
+model WebhookEvent {
+  id String @id @default(uuid())
+
+  provider String
+
+  eventId String @unique
+
+  type String
+
+  payload Json
+
+  processed Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([eventId])
+}
+
+/**
+ * =====================================================
+ * IDEMPOTENCY (CRITICAL FINTECH FEATURE)
+ * =====================================================
+ */
+model IdempotencyKey {
+  id String @id @default(uuid())
+
+  key String
+
+  userId   String?
+  endpoint String
+
+  request  Json
+  response Json?
+
+  createdAt DateTime @default(now())
+
+  @@unique([key, endpoint])
+  @@index([userId])
+}
+
+/**
+ * =====================================================
+ * PAYOUT SYSTEM (ASYNC + RETRY)
+ * =====================================================
+ */
+model Payout {
+  id String @id @default(uuid())
+
+  invoiceId String         @unique
+  invoice   PaymentInvoice @relation(fields: [invoiceId], references: [id])
+
+  amount   Decimal
+  currency String
+
+  method PayoutMethod
+
+  status TransactionStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attempts PayoutAttempt[]
+}
+
+/**
+ * =====================================================
+ * PAYOUT ATTEMPTS (RETRY ENGINE)
+ * =====================================================
+ */
+model PayoutAttempt {
+  id String @id @default(uuid())
+
+  payoutId String
+  payout   Payout @relation(fields: [payoutId], references: [id], onDelete: Cascade)
+
+  status TransactionStatus @default(PENDING)
+
+  provider String
+
+  externalRef String?
+
+  createdAt DateTime @default(now())
+
+  @@index([payoutId])
+}
+
+/**
+ * =====================================================
+ * REFUND SYSTEM
+ * =====================================================
+ */
+model Refund {
+  id String @id @default(uuid())
+
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+
+  amount Decimal
+
+  reason String?
+
+  status TransactionStatus @default(PENDING)
+
+  provider String?
+
+  externalRef String?
+
+  createdAt DateTime @default(now())
+
+  @@index([transactionId])
+}
+
+/**
+ * =====================================================
+ * DISPUTES
+ * =====================================================
+ */
+model Dispute {
+  id String @id @default(uuid())
+
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+
+  reason String
+
+  status DisputeStatus @default(OPEN)
+
+  resolution String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([transactionId])
+}
+
+/**
+ * =====================================================
+ * AUDIT LOG (COMPLIANCE)
+ * =====================================================
+ */
+model AuditLog {
+  id String @id @default(uuid())
+
+  userId String?
+
+  action String
+
+  entity String
+
+  entityId String?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/**
+ * =====================================================
+ * PAYMENT LINK (FOR SHARING)
+ * =====================================================
+ */
+model PaymentLink {
+  id String @id @default(uuid())
+
+  invoiceId String         @unique
+  invoice   PaymentInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  url String @unique
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  expiresAt DateTime?
+
+  @@index([url])
+}
+
+/**
+ * =====================================================
+ * lEDGER (FINANCIAL RECORDS)
+ * =====================================================
+ */
+model Ledger {
+  id String @id @default(uuid())
+
+  walletId String
+  wallet   Wallet @relation(fields: [walletId], references: [id])
+
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+
+  invoiceId String?
+  invoice   PaymentInvoice? @relation(fields: [invoiceId], references: [id])
+
+  amount Decimal
+
+  type LedgerEntryType // CREDIT | DEBIT
+
+  balanceAfter Decimal
+
+  createdAt DateTime @default(now())
+
+  @@index([walletId])
+  @@index([transactionId])
+  @@index([invoiceId])
 }
