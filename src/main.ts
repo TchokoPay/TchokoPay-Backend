@@ -5,40 +5,17 @@ import { AppModule } from './app.module.js';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-
-function parseOrigins(value?: string) {
-  return (value ?? '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-}
-
-function getAllowedOrigins() {
-  const configuredOrigins = [
-    ...parseOrigins(process.env.CORS_ORIGINS),
-    ...parseOrigins(process.env.FRONTEND_URLS),
-    ...parseOrigins(process.env.FRONTEND_URL),
-    ...parseOrigins(process.env.APP_URL),
-  ];
-
-  const defaultOrigins = [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:5173',
-  ];
-
-  return Array.from(new Set([...configuredOrigins, ...defaultOrigins]));
-}
+import { getHttpCorsOrigins, isOriginAllowed } from './config/cors.config.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.use(helmet());
 
-  const allowedOrigins = getAllowedOrigins();
+  const allowedOrigins = getHttpCorsOrigins();
   app.enableCors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (isOriginAllowed(origin, allowedOrigins)) {
         callback(null, true);
         return;
       }

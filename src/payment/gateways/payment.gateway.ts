@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { getWebsocketCorsOrigins } from '../../config/cors.config.js';
 import type {
   PaymentCompleteEvent,
   PaymentLifecycleStage,
@@ -86,7 +87,10 @@ function deriveLifecycleStage(invoice: {
  *   unsubscribe:invoice { invoiceReference }
  */
 @WebSocketGateway({
-  cors: { origin: '*', credentials: true },
+  cors: {
+    origin: getWebsocketCorsOrigins(),
+    credentials: true,
+  },
   namespace: 'payments',
 })
 @Injectable()
