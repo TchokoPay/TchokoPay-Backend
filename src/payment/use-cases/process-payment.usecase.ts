@@ -247,6 +247,7 @@ export class ProcessPaymentUseCase {
           currency: quote.baseCurrency.code,
           phone: payerResolution.payerPhone || undefined,
           reference: invoice.reference,
+          description: invoice.description || undefined,
           metadata: {
             country: invoice.country,
             method: paymentMethod,
@@ -259,6 +260,7 @@ export class ProcessPaymentUseCase {
           amount: Number(quote.baseAmount),
           currency: quote.baseCurrency.code,
           reference: invoice.reference,
+          description: invoice.description || undefined,
         });
       }
 

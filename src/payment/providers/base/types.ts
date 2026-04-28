@@ -3,6 +3,7 @@ export type PayinDto = {
   currency: string;
   phone?: string;
   reference: string;
+  description?: string;
   metadata?: Record<string, any>;
 };
 
@@ -11,5 +12,6 @@ export type PayoutDto = {
   currency: string;
   phone?: string;
   reference: string;
+  description?: string;
   metadata?: Record<string, any>;
 };

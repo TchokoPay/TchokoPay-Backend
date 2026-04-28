@@ -53,10 +53,14 @@ export class LightningProvider implements PaymentProvider {
         throw new BadRequestException('Amount must be greater than 0');
       }
 
-      // Create invoice with Blink API
+      // Create invoice with Blink API — use the user's reason/description as the memo
+      const memo = data.description?.trim()
+        ? data.description.trim()
+        : `TchokoPay · ${data.reference}`;
+
       const invoice = await this.blinkApi.createInvoice(
         amountSat,
-        `TchokoPay Payment - ${data.currency}`,
+        memo,
         data.reference,
       );
 

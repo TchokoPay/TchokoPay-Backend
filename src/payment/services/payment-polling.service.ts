@@ -183,16 +183,29 @@ export class PaymentPollingService {
     // Trigger payout — idempotent, safe even if webhook also fires
     const payoutResult = await this.payoutExecutor.execute(job.invoiceId);
 
-    // If the payout has an async transactionId, start payout polling too
+    // If the payout has an async transactionId, start payout polling.
+    // IMPORTANT: use the *payout* method to resolve the provider, NOT the payin provider.
+    // For Lightning payments the payin is via Blink but the payout (MOMO) is via Netwalletpay.
+    // Using job.provider (Blink) for a MOMO payout would poll the wrong API → times out.
     if (payoutResult?.payoutAttemptId && payoutResult.payoutExternalRef) {
+      const payoutPollingProvider = this.resolvePayoutProvider(
+        attempt?.invoice?.payoutMethod ?? '',
+      );
       this.startPayoutPoll({
         invoiceId: job.invoiceId,
         payoutId: payoutResult.payoutId,
         payoutAttemptId: payoutResult.payoutAttemptId,
         externalRef: payoutResult.payoutExternalRef,
-        provider: job.provider, // payout goes through the same provider
+        provider: payoutPollingProvider,
       });
     }
+  }
+
+  /** Map a payout method to the correct polling provider. */
+  private resolvePayoutProvider(payoutMethod: string): PollingProvider {
+    const m = (payoutMethod ?? '').toUpperCase();
+    if (m === 'LIGHTNING' || m === 'BTC' || m === 'CRYPTO') return 'blink';
+    return 'netwalletpay'; // MOMO, ORANGE, BANK, CARD all confirmed via Netwalletpay
   }
 
   private async failPayin(job: PayinPollJob, reason: string): Promise<void> {

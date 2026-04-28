@@ -126,6 +126,7 @@ export class PayRequestUseCase {
       currency: quote.baseCurrency.code,
       phone: payerPhone,
       reference: invoice.reference,
+      description: invoice.description || undefined,
       metadata: {
         country: invoice.country,
         method: paymentMethod,

@@ -175,7 +175,7 @@ export class NetwalletpayProvider implements PaymentProvider {
         CountryCode: country,
         MethodProvider: providerId,
         PhoneNumber: formattedPhone,
-        Description: `Payment for ${reference}`,
+        Description: data.description?.trim() || `Payment for ${reference}`,
         CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`,
         Hash: this.computeHash(orderId),
       };
@@ -268,7 +268,7 @@ export class NetwalletpayProvider implements PaymentProvider {
         CountryCode: country,
         MethodProvider: providerId,
         PhoneNumber: formattedPhone,
-        Description: `Payout for ${reference}`,
+        Description: data.description?.trim() || `Payout for ${reference}`,
         CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`,
         Hash: this.computeHash(orderId),
       };

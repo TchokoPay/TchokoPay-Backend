@@ -90,6 +90,7 @@ export class PayoutExecutorService {
         currency: quote.targetCurrency.code,
         phone: invoice.recipientPhone ?? undefined,
         reference: invoice.reference,
+        description: invoice.description || undefined,
         metadata: {
           country: invoice.country,
           method: invoice.payoutMethod,
