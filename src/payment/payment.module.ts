@@ -11,6 +11,7 @@ import { WebhookController } from './webhooks/webhook.controller.js';
 import { PrismaModule } from '../../prisma/prisma.module.js';
 import { QuoteModule } from '../quote/quote.module.js';
 import { UsersModule } from '../users/users.module.js';
+import { AuthModule } from '../auth/auth.module.js';
 
 // Flow classes
 import { FlowHelper } from './flows/flow.helper.js';
@@ -36,6 +37,8 @@ import { NetwalletpayProvider } from './providers/netwalletpay.provider.js';
 import { PhoneResolutionService } from './services/phone-resolution.service.js';
 import { BlinkApiService } from './providers/services/blink-api.service.js';
 import { PaymentEventService } from './services/payment-event.service.js';
+import { PayoutExecutorService } from './services/payout-executor.service.js';
+import { PaymentPollingService } from './services/payment-polling.service.js';
 import { PaymentGateway } from './gateways/payment.gateway.js';
 
 @Module({
@@ -43,6 +46,7 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     PrismaModule,
     QuoteModule,
     UsersModule,
+    AuthModule,
     HttpModule,
     ConfigModule,
     EventEmitterModule.forRoot(),
@@ -71,6 +75,8 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     PhoneResolutionService,
     BlinkApiService,
     PaymentEventService,
+    PayoutExecutorService,
+    PaymentPollingService,
     // WebSocket Gateway
     PaymentGateway,
   ],

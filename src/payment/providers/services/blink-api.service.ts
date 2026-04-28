@@ -173,43 +173,43 @@ export class BlinkApiService {
    * @param invoiceId Invoice ID from createInvoice
    * @returns Payment status and details
    */
-  async getInvoiceStatus(invoiceId: string): Promise<{
-    id: string;
+  /**
+   * Check Lightning invoice status using the BOLT11 payment request.
+   * Blink's API uses lnInvoicePaymentStatus which requires the full payment request.
+   */
+  async getInvoiceStatus(paymentRequest: string): Promise<{
     status: string;
     paid: boolean;
-    paidAmount?: number;
-    paidAt?: Date;
   }> {
     try {
       const query = `
-        query GetInvoice($id: ID!) {
-          lnInvoice(id: $id) {
-            id
+        query LnInvoicePaymentStatus($input: LnInvoicePaymentStatusInput!) {
+          lnInvoicePaymentStatus(input: $input) {
             status
-            satoshis
-            expiresAt
-            createdAt
-            confirmedAt
+            errors {
+              message
+            }
           }
         }
       `;
 
-      const variables = { id: invoiceId };
+      const variables = { input: { paymentRequest } };
       const response = await this.executeGraphQL(query, variables);
 
-      const invoice = response.data?.lnInvoice;
-      if (!invoice) {
-        throw new BadRequestException('Invoice not found');
+      const result = response.data?.lnInvoicePaymentStatus;
+      if (!result) {
+        throw new BadRequestException('Could not retrieve invoice status from Blink');
       }
 
-      const paid = invoice.confirmedAt !== null;
-      return {
-        id: invoice.id,
-        status: invoice.status,
-        paid,
-        paidAmount: paid ? parseInt(invoice.satoshis) : undefined,
-        paidAt: paid ? new Date(invoice.confirmedAt) : undefined,
-      };
+      if (result.errors?.length > 0) {
+        throw new BadRequestException(`Blink invoice status error: ${result.errors[0].message}`);
+      }
+
+      // Blink statuses: PAID | NOT_RECEIVED | EXPIRED
+      const status: string = (result.status ?? '').toUpperCase();
+      const paid = status === 'PAID';
+
+      return { status, paid };
     } catch (error) {
       console.error('❌ Blink getInvoiceStatus error:', error);
       throw error;
@@ -296,33 +296,34 @@ export class BlinkApiService {
     accountId: string;
   }> {
     try {
-      const query = `
-        query GetAccount($id: ID!) {
-          account(id: $id) {
-            id
-            walletCurrencies {
-              id
-              code
+      const walletId = await this.getDefaultWalletId();
+
+      const mutation = `
+        mutation OnChainAddressCreate($input: OnChainAddressCreateInput!) {
+          onChainAddressCreate(input: $input) {
+            address
+            errors {
+              message
             }
-            defaultWalletId
           }
         }
       `;
 
-      const variables = { id: this.accountId };
-      const response = await this.executeGraphQL(query, variables);
+      const variables = { input: { walletId } };
+      const response = await this.executeGraphQL(mutation, variables);
 
-      const account = response.data?.account;
-      if (!account) {
-        throw new BadRequestException('Account not found');
+      if (response.data?.onChainAddressCreate?.errors?.length > 0) {
+        throw new BadRequestException(
+          `Blink address error: ${response.data.onChainAddressCreate.errors[0].message}`,
+        );
       }
 
-      // This is a simplified version - in production, you'd need to
-      // get or create a specific on-chain address
-      return {
-        address: account.id, // Placeholder - actual implementation needs wallet address
-        accountId: account.id,
-      };
+      const address = response.data?.onChainAddressCreate?.address;
+      if (!address) {
+        throw new InternalServerErrorException('Failed to generate Bitcoin address');
+      }
+
+      return { address, accountId: this.accountId };
     } catch (error) {
       console.error('❌ Blink getBitcoinAddress error:', error);
       throw error;
@@ -428,41 +429,39 @@ export class BlinkApiService {
    */
   async getAccountBalance(): Promise<{
     btc: number; // in satoshis
-    usd: number;
+    usd: number; // in cents
   }> {
     try {
+      // Blink exposes all account data under `me`, not `account(id)`
       const query = `
-        query GetAccount($id: ID!) {
-          account(id: $id) {
-            id
-            wallets {
-              id
-              label
-              balanceAmount {
-                amount
-                currency
+        query GetBalance {
+          me {
+            defaultAccount {
+              wallets {
+                id
+                walletCurrency
+                balance
               }
             }
           }
         }
       `;
 
-      const variables = { id: this.accountId };
-      const response = await this.executeGraphQL(query, variables);
+      const response = await this.executeGraphQL(query);
+      const wallets = response.data?.me?.defaultAccount?.wallets;
 
-      const account = response.data?.account;
-      if (!account || !account.wallets) {
+      if (!wallets) {
         throw new BadRequestException('Could not retrieve account balance');
       }
 
       let btcBalance = 0;
       let usdBalance = 0;
 
-      for (const wallet of account.wallets) {
-        const amount = parseInt(wallet.balanceAmount.amount || '0');
-        if (wallet.balanceAmount.currency === 'BTC') {
+      for (const wallet of wallets) {
+        const amount = Number(wallet.balance ?? 0);
+        if (wallet.walletCurrency === 'BTC') {
           btcBalance = amount;
-        } else if (wallet.balanceAmount.currency === 'USD') {
+        } else if (wallet.walletCurrency === 'USD') {
           usdBalance = amount;
         }
       }

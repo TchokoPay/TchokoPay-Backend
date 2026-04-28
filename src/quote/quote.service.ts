@@ -130,14 +130,23 @@ export class QuoteService {
 
     // ============================
     // RECEIVE MODE: Amount specified is what receiver GETS (exact)
-    // Receiver gets: amount (exact, no fees deducted)
-    // Payer pays: more to cover receiver's amount + fees
+    // Receiver gets: amount (exact)
+    // Payer pays: equivalent in base currency + fee (both in base currency)
     // ============================
     else if (dto.amountType === 'RECEIVE') {
-      targetAmount = inputAmount; // Receiver gets exact amount (no deduction)
-      feeAmount = targetAmount * (feePercent / 100); // Calculate fee on receiver amount
-      const netBase = targetAmount / adjustedRate; // Convert receiver amount back to payer currency
-      baseAmount = netBase + feeAmount; // Payer pays: NET + FEE
+      targetAmount = inputAmount; // Receiver gets exactly this
+
+      if (isSameCurrency) {
+        // Same currency — fee is a straight percentage added on top
+        feeAmount = targetAmount * (feePercent / 100);
+        baseAmount = targetAmount + feeAmount;
+      } else {
+        // Cross-currency — convert to base first, then apply fee in base currency.
+        // Avoids the unit-mismatch bug of adding XAF fee to a BTC amount.
+        const netBase = targetAmount / adjustedRate;
+        feeAmount = netBase * (feePercent / 100);
+        baseAmount = netBase + feeAmount;
+      }
     }
 
     // ============================

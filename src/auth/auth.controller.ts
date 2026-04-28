@@ -1,11 +1,13 @@
 import {
   Controller,
+  Get,
   Post,
   Body,
   HttpCode,
   HttpStatus,
   Res,
   Req,
+  UnauthorizedException,
 } from '@nestjs/common';
 
 import {
@@ -23,11 +25,54 @@ import { VerifyDto } from './dto/verify.dto.js';
 import { Public } from './decorators/public.decorator.js';
 
 import type { Request, Response } from 'express';
+import type { CookieOptions } from 'express';
+
+const isProduction = process.env.NODE_ENV === 'production';
+const refreshCookieLifetimeMs = 7 * 24 * 60 * 60 * 1000;
+
+function parseSameSite(value?: string): CookieOptions['sameSite'] {
+  const normalized = value?.trim().toLowerCase();
+
+  if (normalized === 'strict') return 'strict';
+  if (normalized === 'lax') return 'lax';
+  if (normalized === 'none') return 'none';
+
+  return isProduction ? 'strict' : 'lax';
+}
+
+function refreshCookieOptions(): CookieOptions {
+  const sameSite = parseSameSite(process.env.AUTH_COOKIE_SAME_SITE);
+  const secure = sameSite === 'none' ? true : isProduction;
+  const domain = process.env.AUTH_COOKIE_DOMAIN?.trim() || undefined;
+
+  return {
+    httpOnly: true,
+    secure,
+    sameSite,
+    domain,
+    path: '/auth/refresh',
+    maxAge: refreshCookieLifetimeMs,
+  };
+}
 
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(private authService: AuthService) {}
+
+  @Public()
+  @Get('google/config')
+  @ApiOperation({
+    summary: 'Get Google auth client configuration for the frontend',
+  })
+  getGoogleConfig() {
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim() || null;
+
+    return {
+      enabled: Boolean(clientId),
+      clientId,
+    };
+  }
 
   // =========================
   // 📝 SIGNUP (OTP REQUIRED)
@@ -53,8 +98,18 @@ export class AuthController {
       'Verify OTP to activate account and get access token',
   })
   @ApiBody({ type: VerifyDto })
-  async verify(@Body() dto: VerifyDto) {
-    return this.authService.verifyOtp(dto);
+  async verify(
+    @Body() dto: VerifyDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const tokens = await this.authService.verifyOtp(dto);
+
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+
+    return {
+      message: tokens.message,
+      accessToken: tokens.accessToken,
+    };
   }
 
   // =========================
@@ -74,12 +129,7 @@ export class AuthController {
   ) {
     const tokens = await this.authService.login(dto);
 
-    res.cookie('refreshToken', tokens.refreshToken, {
-      httpOnly: true,
-      secure: true, // set false in dev
-      sameSite: 'strict',
-      path: '/auth/refresh',
-    });
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
 
     return {
       accessToken: tokens.accessToken,
@@ -113,12 +163,7 @@ export class AuthController {
   ) {
     const result = await this.authService.googleLogin(token);
 
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: '/auth/refresh',
-    });
+    res.cookie('refreshToken', result.refreshToken, refreshCookieOptions());
 
     return {
       accessToken: result.accessToken,
@@ -155,7 +200,7 @@ export class AuthController {
     const refreshToken = req.cookies?.refreshToken;
 
     if (!refreshToken || !userId) {
-      throw new Error('Unauthorized');
+      throw new UnauthorizedException('Unauthorized');
     }
 
     const tokens = await this.authService.refreshTokens(
@@ -163,12 +208,7 @@ export class AuthController {
       refreshToken,
     );
 
-    res.cookie('refreshToken', tokens.refreshToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: '/auth/refresh',
-    });
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
 
     return {
       accessToken: tokens.accessToken,
@@ -178,35 +218,24 @@ export class AuthController {
   // =========================
   // 🚪 LOGOUT
   // =========================
-  @Public()
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Logout user',
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        userId: {
-          type: 'string',
-          example: 'user-id',
-        },
-      },
-      required: ['userId'],
-    },
+    summary: 'Logout current user',
   })
   async logout(
-    @Body('userId') userId: string,
+    @Req() req: Request & { user?: { userId?: string } },
     @Res({ passthrough: true }) res: Response,
   ) {
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      throw new UnauthorizedException('Unauthorized');
+    }
+
     await this.authService.logout(userId);
 
-    res.clearCookie('refreshToken', {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-    });
+    res.clearCookie('refreshToken', refreshCookieOptions());
 
     return {
       message: 'Logged out successfully',

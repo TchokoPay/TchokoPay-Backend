@@ -4,11 +4,53 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import { TransactionStatus, type Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
 
 import cloudinary from '../config/cloudinary.config.js';
+
+type InvoiceHistoryRow = Prisma.PaymentInvoiceGetPayload<{
+  include: {
+    currency: true;
+    quote: {
+      include: {
+        baseCurrency: true;
+        targetCurrency: true;
+      };
+    };
+    createdBy: {
+      include: {
+        paymentIdentity: true;
+      };
+    };
+    recipient: {
+      include: {
+        paymentIdentity: true;
+      };
+    };
+    attempts: {
+      include: {
+        currency: true;
+      };
+    };
+    payout: {
+      include: {
+        attempts: true;
+      };
+    };
+  };
+}>;
+
+type HistoryStage =
+  | 'REQUEST_OPEN'
+  | 'AWAITING_PAYER'
+  | 'PAYER_CONFIRMED'
+  | 'PAYOUT_PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED';
 
 @Injectable()
 export class UsersService {
@@ -26,8 +68,9 @@ export class UsersService {
       where: { id: userId },
       include: {
         contacts: true,
-        wallet: true,
+        wallets: { include: { currency: true } },
         kyc: true,
+        paymentIdentity: true,
       },
     });
 
@@ -74,6 +117,53 @@ export class UsersService {
     this.logger.log(`User updated successfully: ${userId}`);
 
     return safeUser;
+  }
+
+  // =====================================================
+  // 📋 GET USER TRANSACTION HISTORY
+  // =====================================================
+  async getMyTransactions(userId: string) {
+    const invoices = await this.prisma.paymentInvoice.findMany({
+      where: {
+        OR: [{ createdById: userId }, { recipientId: userId }],
+      },
+      include: {
+        currency: true,
+        quote: {
+          include: {
+            baseCurrency: true,
+            targetCurrency: true,
+          },
+        },
+        createdBy: {
+          include: {
+            paymentIdentity: true,
+          },
+        },
+        recipient: {
+          include: {
+            paymentIdentity: true,
+          },
+        },
+        attempts: {
+          include: {
+            currency: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+        payout: {
+          include: {
+            attempts: {
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 100,
+    });
+
+    return invoices.map((invoice) => this.mapInvoiceHistory(invoice, userId));
   }
 
   // =====================================================
@@ -170,5 +260,193 @@ export class UsersService {
     } catch {
       return null;
     }
+  }
+
+  private mapInvoiceHistory(invoice: InvoiceHistoryRow, userId: string) {
+    const role =
+      invoice.createdById === userId
+        ? 'PAYER'
+        : invoice.recipientId === userId && invoice.flow === 'REQUEST' && !invoice.paymentMethod
+          ? 'REQUESTER'
+          : 'RECIPIENT';
+
+    const direction = role === 'PAYER' ? 'OUT' : 'IN';
+    const stage = this.deriveHistoryStage(invoice);
+    const latestAttempt = invoice.attempts[0] ?? null;
+    const payerAmount = invoice.quote?.baseAmount ?? latestAttempt?.amount ?? null;
+    const payerCurrency = invoice.quote?.baseCurrency?.code ?? latestAttempt?.currency?.code ?? null;
+    const recipientAmount = invoice.quote?.targetAmount ?? invoice.amount;
+    const recipientCurrency = invoice.quote?.targetCurrency?.code ?? invoice.currency.code;
+
+    const counterparty =
+      role === 'PAYER'
+        ? this.buildParty(invoice.recipient, invoice.recipientName, invoice.recipientPhone)
+        : this.buildParty(invoice.createdBy, null, null);
+
+    const rawProvider =
+      latestAttempt?.provider ?? invoice.paymentMethod ?? null;
+
+    return {
+      id: invoice.id,
+      reference: invoice.reference,
+      type: invoice.flow === 'REQUEST' && role !== 'PAYER' ? 'REQUEST' : 'PAYMENT',
+      role,
+      direction,
+      flow: invoice.flow,
+      status: invoice.status,
+      stage,
+      stageLabel: this.getStageLabel(stage),
+      // Amount from this user's perspective: what they pay (OUT) or receive (IN)
+      amount:
+        role === 'PAYER'
+          ? (payerAmount?.toString() ?? invoice.amount.toString())
+          : recipientAmount.toString(),
+      currency:
+        role === 'PAYER'
+          ? { code: payerCurrency ?? invoice.currency.code, symbol: null }
+          : { code: recipientCurrency, symbol: invoice.currency.symbol },
+      // Both sides of the exchange — useful for cross-currency display
+      baseAmount: payerAmount?.toString() ?? null,
+      baseCurrencyCode: payerCurrency,
+      targetAmount: recipientAmount.toString(),
+      targetCurrencyCode: recipientCurrency,
+      // Fee in payer currency; null when not yet calculated or not applicable
+      fee: invoice.quote?.fee?.toString() ?? latestAttempt?.fee?.toString() ?? null,
+      paymentMethod: invoice.paymentMethod,
+      payoutMethod: invoice.payoutMethod,
+      // Raw internal provider code
+      provider: rawProvider,
+      // Human-readable name mapped from paymentMethod/payoutMethod — used for logo lookup
+      displayProvider: this.resolveDisplayProvider(
+        invoice.paymentMethod,
+        invoice.payoutMethod,
+        role,
+      ),
+      counterparty,
+      description: invoice.description,
+      expiresAt: invoice.expiresAt,
+      createdAt: invoice.createdAt,
+      updatedAt: invoice.updatedAt,
+    };
+  }
+
+  private deriveHistoryStage(invoice: InvoiceHistoryRow): HistoryStage {
+    const latestAttempt = invoice.attempts[0] ?? null;
+    const latestPayoutAttempt = invoice.payout?.attempts[0] ?? null;
+
+    if (invoice.status === TransactionStatus.SUCCESS) {
+      return 'COMPLETED';
+    }
+
+    if (invoice.status === TransactionStatus.FAILED) {
+      return 'FAILED';
+    }
+
+    if (invoice.status === TransactionStatus.CANCELLED) {
+      return 'CANCELLED';
+    }
+
+    if (invoice.flow === 'REQUEST' && !invoice.paymentMethod && !latestAttempt) {
+      return 'REQUEST_OPEN';
+    }
+
+    if (
+      invoice.payout?.status === TransactionStatus.PROCESSING ||
+      latestPayoutAttempt?.status === TransactionStatus.PROCESSING
+    ) {
+      return 'PAYOUT_PROCESSING';
+    }
+
+    if (latestAttempt?.status === TransactionStatus.SUCCESS) {
+      return 'PAYER_CONFIRMED';
+    }
+
+    if (
+      latestAttempt?.status === TransactionStatus.PROCESSING ||
+      latestAttempt?.status === TransactionStatus.PENDING ||
+      invoice.status === TransactionStatus.PROCESSING
+    ) {
+      return 'AWAITING_PAYER';
+    }
+
+    return 'AWAITING_PAYER';
+  }
+
+  private getStageLabel(stage: HistoryStage): string {
+    switch (stage) {
+      case 'REQUEST_OPEN':
+        return 'Waiting for payer';
+      case 'AWAITING_PAYER':
+        return 'Waiting for payment';
+      case 'PAYER_CONFIRMED':
+        return 'Payment received';
+      case 'PAYOUT_PROCESSING':
+        return 'Paying recipient';
+      case 'COMPLETED':
+        return 'Completed';
+      case 'FAILED':
+        return 'Failed';
+      case 'CANCELLED':
+        return 'Cancelled';
+      default:
+        return 'Pending';
+    }
+  }
+
+  /**
+   * Maps raw payment/payout method enum values to the human-readable provider
+   * name that the frontend uses for logo lookup (PaymentMethodIcon).
+   *
+   * Rule: PAYER → use paymentMethod (how they paid).
+   *       RECIPIENT/REQUESTER → use payoutMethod (how they received).
+   */
+  private resolveDisplayProvider(
+    paymentMethod: string | null,
+    payoutMethod: string,
+    role: string,
+  ): string {
+    const method =
+      role === 'PAYER' ? (paymentMethod ?? payoutMethod) : payoutMethod;
+    switch (method?.toUpperCase()) {
+      case 'BTC':
+        return 'Bitcoin';
+      case 'LIGHTNING':
+        return 'Lightning';
+      case 'MOMO':
+        return 'MTN MoMo';
+      case 'ORANGE':
+        return 'Orange Money';
+      case 'CARD':
+        return 'Card';
+      case 'BANK':
+        return 'Bank Transfer';
+      case 'CRYPTO':
+        return 'Bitcoin';
+      default:
+        return method ?? 'TchokoPay';
+    }
+  }
+
+  private buildParty(
+    user:
+      | {
+          firstName: string;
+          lastName: string;
+          paymentIdentity?: { handle: string } | null;
+        }
+      | null
+      | undefined,
+    fallbackName?: string | null,
+    fallbackPhone?: string | null,
+  ) {
+    const fullName = user
+      ? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()
+      : (fallbackName ?? null);
+
+    return {
+      name: fullName || null,
+      handle: user?.paymentIdentity?.handle ?? null,
+      phone: fallbackPhone ?? null,
+    };
   }
 }

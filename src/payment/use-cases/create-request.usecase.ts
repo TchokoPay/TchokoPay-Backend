@@ -28,13 +28,15 @@ export class CreateRequestUseCase {
     // For REQUEST CREATE (MOMO payout only for now):
     // - Registered user: auto-use verified phone, no payerPhone needed
     // - Guest user: MUST provide payerPhone (their MOMO number for receiving)
+    const requestedReceivePhone = dto.recipientPhone || dto.payerPhone;
+
     if (dto.payoutMethod?.toUpperCase() === 'MOMO') {
       // MOMO payout - check if registered user or guest
       const isRegistered = userId && userId.trim().length > 0;
       
-      if (!isRegistered && !dto.payerPhone) {
+      if (!isRegistered && !requestedReceivePhone) {
         throw new BadRequestException(
-          'For MOMO payout as guest user, payerPhone is required (your MOMO number to receive funds)',
+          'For MOMO payout as guest user, a receive phone number is required',
         );
       }
     }
@@ -60,11 +62,11 @@ export class CreateRequestUseCase {
       requesterPhone = contact.value;
       requesterName = `${requester.firstName} ${requester.lastName}`;
     } else {
-      // Guest user - use provided payerPhone
-      if (!dto.payerPhone) {
-        throw new BadRequestException('Guest users must provide payerPhone to receive funds via MOMO');
+      // Guest user - use provided receive phone
+      if (!requestedReceivePhone) {
+        throw new BadRequestException('Guest users must provide a mobile money number to receive funds');
       }
-      requesterPhone = dto.payerPhone;
+      requesterPhone = requestedReceivePhone;
       requesterName = 'Guest User';
     }
 
@@ -100,27 +102,28 @@ export class CreateRequestUseCase {
         recipient: requester ? { connect: { id: requester.id } } : undefined,
         recipientPhone: requesterPhone,
         recipientName: requesterName,
-        createdBy: requester ? { connect: { id: requester.id } } : undefined,
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
       },
     });
 
-    const paymentRequest = await this.prisma.paymentRequest.create({
-      data: {
-        user: { connect: { id: requester.id } },
-        amount: new Prisma.Decimal(targetAmount),
-        currency: targetCurrency.code,
-        status: 'PENDING',
-        paymentLink: `REQUEST://${invoice.id}`,
-        expiresAt: invoice.expiresAt,
-        metadata: {
-          amountType: dto.amountType,
-          payoutMethod: dto.payoutMethod,
-          invoiceId: invoice.id,
-          action: PaymentAction.CREATE,
-        },
-      },
-    });
+    const paymentRequest = requester
+      ? await this.prisma.paymentRequest.create({
+          data: {
+            user: { connect: { id: requester.id } },
+            amount: new Prisma.Decimal(targetAmount),
+            currency: targetCurrency.code,
+            status: 'PENDING',
+            paymentLink: `REQUEST://${invoice.id}`,
+            expiresAt: invoice.expiresAt,
+            metadata: {
+              amountType: dto.amountType,
+              payoutMethod: dto.payoutMethod,
+              invoiceId: invoice.id,
+              action: PaymentAction.CREATE,
+            },
+          },
+        })
+      : null;
 
     return {
       message: 'Payment request created',

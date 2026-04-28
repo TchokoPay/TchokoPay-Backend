@@ -1,10 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
+export type PaymentLifecycleStage =
+  | 'AWAITING_PAYER'
+  | 'PAYER_CONFIRMED'
+  | 'PAYOUT_PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED';
+
 export interface PaymentCompleteEvent {
   invoiceId: string;
   invoiceReference: string;
-  status: 'SUCCESS' | 'FAILED' | 'PENDING';
+  status: 'SUCCESS' | 'FAILED' | 'PENDING' | 'PROCESSING';
+  stage: PaymentLifecycleStage;
   paymentMethod: string;
   payoutMethod: string;
   amount: number;
@@ -12,6 +20,7 @@ export interface PaymentCompleteEvent {
   paymentDetails?: {
     status: string;
     invoiceId?: string;
+    transactionId?: string;
     paymentRequest?: string;
     expiresAt?: string;
     address?: string;
@@ -30,55 +39,71 @@ export interface WebhookPaymentEvent {
   provider: string;
   eventType: 'payment.confirmed' | 'payment.failed' | 'payment.pending';
   invoiceId: string;
+  /** E.g. "INV-1774421373834" — used for WebSocket room routing */
+  invoiceReference: string;
+  stage?: PaymentLifecycleStage;
   externalRef?: string;
   status: string;
   amount?: number;
   currency?: string;
   failureReason?: string;
-  payload: any;
+  payload: unknown;
   timestamp: Date;
 }
 
 /**
- * Payment Event Service
- * Centralizes payment events for WebSocket broadcasting
+ * Centralises all payment events so they can reach the WebSocket gateway,
+ * admin dashboards, and any future subscribers without tight coupling.
+ *
  * Emits when:
- * - Payment is completed (success/failure)
- * - Webhook is received from provider (Blink, MOMO, etc.)
+ *  - A payment is initiated / completes / fails  (payment.complete)
+ *  - A provider webhook is received              (webhook.payment)
+ *  - A payout is confirmed                       (payment.complete with payoutDetails)
  */
 @Injectable()
 export class PaymentEventService {
   constructor(private eventEmitter: EventEmitter2) {}
 
   /**
-   * Emit when payment completes (immediately after processing)
-   * Sent when: Lightning invoice created, MOMO processed, etc.
+   * Emit after payment processing (Lightning invoice created, MOMO request sent, etc.)
+   * Also used when payout is confirmed.
    */
-  async emitPaymentComplete(event: PaymentCompleteEvent) {
+  emitPaymentComplete(event: PaymentCompleteEvent) {
     console.log(
-      `📤 Emitting payment.complete event for invoice: ${event.invoiceReference}`,
+      `📤 payment.complete → ${event.invoiceReference} [${event.status}]`,
     );
     this.eventEmitter.emit('payment.complete', event);
   }
 
   /**
-   * Emit when webhook is received from provider
-   * Sent when: Blink confirms payment, MOMO sends callback, etc.
+   * Emit when a provider webhook fires (Blink confirmed, Netwalletpay callback, etc.)
+   * invoiceReference is required so the gateway can route to the correct room.
    */
-  async emitWebhookPayment(event: WebhookPaymentEvent) {
+  emitWebhookPayment(event: WebhookPaymentEvent) {
     console.log(
-      `📤 Emitting webhook.payment event from ${event.provider}: ${event.eventType}`,
+      `📤 webhook.payment → ${event.invoiceReference} | ${event.provider} | ${event.eventType}`,
     );
     this.eventEmitter.emit('webhook.payment', event);
   }
 
   /**
-   * Emit to notify specific user of their payment status
-   * Used by WebSocket gateway to know which rooms to broadcast to
+   * Send a targeted update to a specific authenticated user.
+   * The gateway listens on user:${userId} and forwards to the connected client.
    */
-  async notifyUser(userId: string, event: PaymentCompleteEvent) {
-    console.log(`📤 Broadcasting to user ${userId}:`, event.invoiceReference);
-    this.eventEmitter.emit(`payment:${userId}`, event);
+  notifyUser(userId: string, event: PaymentCompleteEvent) {
+    if (!userId?.trim()) {
+      console.log(
+        `📤 notify user skipped (guest/no userId) → ${event.invoiceReference} [${event.status}]`,
+      );
+      this.eventEmitter.emit('payment:global', event);
+      return;
+    }
+
+    console.log(
+      `📤 notify user ${userId} → ${event.invoiceReference} [${event.status}]`,
+    );
+    // Gateway picks this up via @OnEvent('payment.complete') since event has userId
+    this.eventEmitter.emit('payment.complete', { ...event, userId });
     // Also emit globally for admin dashboards
     this.eventEmitter.emit('payment:global', event);
   }

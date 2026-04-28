@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  BadRequestException,
-  Logger,
-} from '@nestjs/common';
-
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 
 @Injectable()
@@ -30,7 +25,6 @@ export class OtpService {
 
     if (lastOtp) {
       const diff = Date.now() - new Date(lastOtp.createdAt).getTime();
-
       if (diff < 60 * 1000) {
         throw new BadRequestException(
           'Please wait before requesting another OTP',
@@ -45,9 +39,15 @@ export class OtpService {
   async sendOtp(contactId: string) {
     await this.checkRateLimit(contactId);
 
-    const code = this.generateOtp();
+    const contact = await this.prisma.userContact.findUnique({
+      where: { id: contactId },
+    });
 
-    this.logger.log(`OTP for contact ${contactId}: ${code}`);
+    const code = this.generateOtp();
+    const destination = String(contact?.value ?? contactId);
+    const type = String(contact?.type ?? 'UNKNOWN');
+
+    this.logOtpIssued(type, destination, code);
 
     await this.prisma.verificationCode.create({
       data: {
@@ -64,22 +64,47 @@ export class OtpService {
   // ✅ VERIFY OTP
   // =====================================================
   async verifyOtp(contactId: string, code: string) {
+    const contact = await this.prisma.userContact.findUnique({
+      where: { id: contactId },
+    });
+
+    const label = String(contact?.value ?? contactId);
+
     const otp = await this.prisma.verificationCode.findFirst({
-      where: {
-        contactId,
-        code,
-      },
+      where: { contactId, code },
       orderBy: { createdAt: 'desc' },
     });
 
     if (!otp) {
+      this.logger.warn(`OTP verify FAILED  | ${label} | code: ${code}`);
       throw new BadRequestException('Invalid OTP');
     }
 
     if (otp.expiresAt < new Date()) {
+      this.logger.warn(`OTP verify EXPIRED | ${label}`);
       throw new BadRequestException('OTP expired');
     }
 
+    this.logger.log(`OTP verify ✓       | ${label}`);
     return true;
+  }
+
+  // =====================================================
+  // 🖨️ PRIVATE — BOX LOGGER
+  // =====================================================
+  private logOtpIssued(type: string, destination: string, code: string) {
+    const pad = (s: string, n: number) => s.padEnd(n);
+    const W = 27;
+    this.logger.log(
+      '\n' +
+        '┌─────────────────────────────────────────┐\n' +
+        '│              🔐  OTP ISSUED              │\n' +
+        '├─────────────────────────────────────────┤\n' +
+        `│  Type        : ${pad(type, W)}│\n` +
+        `│  Destination : ${pad(destination, W)}│\n` +
+        `│  Code        : ${pad(code, W)}│\n` +
+        `│  Expires     : ${pad('10 minutes', W)}│\n` +
+        '└─────────────────────────────────────────┘',
+    );
   }
 }

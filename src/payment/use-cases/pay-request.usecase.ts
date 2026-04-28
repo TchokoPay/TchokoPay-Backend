@@ -4,16 +4,21 @@ import { PaymentProviderFactory } from '../providers/payment-provider.factory.js
 import { TransactionStatus, Prisma } from '@prisma/client';
 import { FlowType } from '../enums/payment.enums.js';
 import { QuoteService } from '../../quote/quote.service.js';
+import { PaymentEventService } from '../services/payment-event.service.js';
+import { PaymentPollingService, PollingProvider } from '../services/payment-polling.service.js';
 
 type QuoteWithCurrencies = Prisma.QuoteGetPayload<{
   include: { baseCurrency: true; targetCurrency: true };
 }>;
+
 @Injectable()
 export class PayRequestUseCase {
   constructor(
     private prisma: PrismaService,
     private providerFactory: PaymentProviderFactory,
     private quoteService: QuoteService,
+    private paymentEventService: PaymentEventService,
+    private pollingService: PaymentPollingService,
   ) {}
 
   async execute(userId: string, dto: any) {
@@ -38,37 +43,45 @@ export class PayRequestUseCase {
       throw new BadRequestException('Invoice has expired');
     }
 
-    const payerContact = await this.prisma.userContact.findFirst({
-      where: { userId, type: 'PHONE', isVerified: true },
-    });
+    const isGuest = !userId?.trim();
 
-    if (!payerContact) {
-      throw new BadRequestException('Payer must have a verified phone contact');
+    let payerPhone: string | undefined;
+    if (isGuest) {
+      if (!dto.payerPhone) {
+        throw new BadRequestException(
+          'Guest payments require a payerPhone. Please provide your MOMO number.',
+        );
+      }
+      payerPhone = dto.payerPhone as string;
+    } else {
+      const payerContact = await this.prisma.userContact.findFirst({
+        where: { userId, type: 'PHONE', isVerified: true },
+      });
+
+      if (!payerContact && !dto.payerPhone) {
+        throw new BadRequestException(
+          'No verified phone found. Please verify your phone in settings or provide payerPhone.',
+        );
+      }
+
+      payerPhone = payerContact?.value ?? (dto.payerPhone as string | undefined);
     }
 
-    // Get payment method from request or use default
     const paymentMethod = (dto.paymentMethod || 'MOMO')?.toUpperCase();
 
-    // Get metadata from payment request to understand the original request
     const paymentRequest = await this.prisma.paymentRequest.findFirst({
       where: {
         metadata: { path: ['invoiceId'], equals: invoice.id },
       },
     });
 
-    if (!paymentRequest) {
-      throw new BadRequestException('Payment request not found');
-    }
+    const requestMetadata = paymentRequest?.metadata as any;
+    const amountType = requestMetadata?.amountType || 'RECEIVE';
 
-    const requestMetadata = paymentRequest.metadata as any;
-    const amountType = requestMetadata?.amountType || 'PAY';
-
-    // Validate baseCurrency is provided
     if (!dto.baseCurrency) {
       throw new BadRequestException('baseCurrency is required to pay a request');
     }
 
-    // Now create the quote based on payer's payment method + invoice details
     const createQuotePayload = {
       amount: Number(invoice.amount),
       amountType,
@@ -79,18 +92,21 @@ export class PayRequestUseCase {
       flow: 'REQUEST' as any,
     };
 
-    const quote = await this.quoteService.create(createQuotePayload) as QuoteWithCurrencies;
+    const quote = (await this.quoteService.create(
+      createQuotePayload,
+    )) as QuoteWithCurrencies;
 
-    // Update invoice with the quote and payment method
     await this.prisma.paymentInvoice.update({
       where: { id: invoice.id },
       data: {
         quote: { connect: { id: quote.id } },
         paymentMethod,
+        status: TransactionStatus.PROCESSING,
+        createdBy: isGuest
+          ? { disconnect: true }
+          : { connect: { id: userId } },
       },
     });
-
-    const payinProvider = this.providerFactory.getProvider(paymentMethod);
 
     const attempt = await this.prisma.paymentAttempt.create({
       data: {
@@ -104,50 +120,112 @@ export class PayRequestUseCase {
       },
     });
 
-    // PAYIN FROM PAYER - use paymentMethod provider
-    await payinProvider.payin({
+    const payinProvider = this.providerFactory.getProvider(paymentMethod, invoice.country);
+    const payinResponse = await payinProvider.payin({
       amount: Number(quote.baseAmount),
       currency: quote.baseCurrency.code,
-      phone: payerContact.value,
+      phone: payerPhone,
       reference: invoice.reference,
+      metadata: {
+        country: invoice.country,
+        method: paymentMethod,
+        type: 'COLLECTION',
+      },
     });
+
+    if (payinResponse?.status === 'FAILED') {
+      await this.prisma.paymentAttempt.update({
+        where: { id: attempt.id },
+        data: {
+          status: TransactionStatus.FAILED,
+          failureReason: payinResponse?.error || 'Provider returned FAILED',
+          providerResponse: payinResponse,
+        },
+      });
+      await this.prisma.paymentInvoice.update({
+        where: { id: invoice.id },
+        data: { status: TransactionStatus.FAILED },
+      });
+      if (paymentRequest) {
+        await this.prisma.paymentRequest.update({
+          where: { id: paymentRequest.id },
+          data: { status: TransactionStatus.FAILED },
+        });
+      }
+
+      return {
+        message: 'Payment failed',
+        invoice: { ...invoice, status: TransactionStatus.FAILED },
+        quote,
+        payment: { status: 'FAILED', error: payinResponse?.error },
+      };
+    }
+
+    const externalRef =
+      payinResponse?.transactionId ||
+      payinResponse?.id ||
+      payinResponse?.invoiceId ||
+      null;
 
     await this.prisma.paymentAttempt.update({
       where: { id: attempt.id },
-      data: { status: TransactionStatus.SUCCESS },
-    });
-
-    // PAYOUT TO REQUESTER - use payoutMethod provider
-    const payoutProvider = this.providerFactory.getProvider(invoice.payoutMethod);
-
-    await payoutProvider.payout({
-      amount: Number(quote.targetAmount),
-      currency: quote.targetCurrency.code,
-      phone: invoice.recipientPhone,
-      reference: invoice.reference,
-    });
-
-    await this.prisma.paymentInvoice.update({
-      where: { id: invoice.id },
-      data: { status: TransactionStatus.SUCCESS },
-    });
-
-    await this.prisma.quote.update({
-      where: { id: quote.id },
-      data: { isUsed: true },
-    });
-
-    await this.prisma.paymentRequest.updateMany({
-      where: {
-        metadata: { path: ['invoiceId'], equals: invoice.id },
+      data: {
+        status: TransactionStatus.PROCESSING,
+        externalRef,
+        providerResponse: payinResponse,
       },
-      data: { status: TransactionStatus.SUCCESS },
     });
 
-    return {
-      message: 'Payment request paid successfully',
-      invoice: { ...invoice, status: TransactionStatus.SUCCESS },
-      attempt: { ...attempt, status: TransactionStatus.SUCCESS },
+    const result: any = {
+      message: 'Payment initiated - awaiting confirmation',
+      invoice: { ...invoice, status: TransactionStatus.PROCESSING, quote },
+      quote,
+      payment: {
+        status: payinResponse?.status ?? 'PROCESSING',
+        externalRef,
+        paymentRequest: payinResponse?.paymentRequest ?? null,
+        amount: payinResponse?.amount ?? null,
+        currency: payinResponse?.currency ?? null,
+        expiresAt: payinResponse?.expiresAt ?? null,
+        address: payinResponse?.address ?? null,
+        reference: payinResponse?.reference ?? null,
+      },
     };
+
+    await this.paymentEventService.emitPaymentComplete({
+      invoiceId: invoice.id,
+      invoiceReference: invoice.reference,
+      status: 'PENDING',
+      stage: 'AWAITING_PAYER',
+      paymentMethod,
+      payoutMethod: invoice.payoutMethod,
+      amount: Number(quote.baseAmount),
+      currency: quote.baseCurrency.code,
+      paymentDetails: result.payment,
+      timestamp: new Date(),
+      userId: isGuest ? undefined : userId,
+    });
+
+    if (externalRef) {
+      const pollingProvider = this.resolvePollingProvider(paymentMethod);
+      this.pollingService.start({
+        invoiceId: invoice.id,
+        attemptId: attempt.id,
+        externalRef,
+        provider: pollingProvider,
+        blinkPaymentRequest:
+          pollingProvider === 'blink'
+            ? (payinResponse?.paymentRequest ?? undefined)
+            : undefined,
+      });
+    }
+
+    return result;
+  }
+
+  private resolvePollingProvider(method: string): PollingProvider {
+    return method.toUpperCase() === 'LIGHTNING' || method.toUpperCase() === 'BTC'
+      ? 'blink'
+      : 'netwalletpay';
   }
 }

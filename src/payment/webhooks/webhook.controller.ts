@@ -4,65 +4,47 @@ import {
   Body,
   BadRequestException,
   Headers,
-  UnauthorizedException,
-  Inject,
+  Logger,
 } from '@nestjs/common';
+import { createHmac, createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '../../../prisma/prisma.service.js';
-import { PaymentEventService } from '../services/payment-event.service.js';
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { TransactionStatus } from '@prisma/client';
+import { PrismaService } from '../../../prisma/prisma.service.js';
+import { PaymentEventService } from '../services/payment-event.service.js';
+import { PayoutExecutorService } from '../services/payout-executor.service.js';
+import { PaymentPollingService, PollingProvider } from '../services/payment-polling.service.js';
 
-/**
- * Webhook Controller for Payment Providers
- * Receives callbacks from Blink, MOMO, Orange, etc.
- * Processes payment confirmations and updates invoice status
- */
 @ApiTags('Webhooks')
 @Controller('webhooks')
 export class WebhookController {
+  private readonly logger = new Logger(WebhookController.name);
+
   constructor(
     private configService: ConfigService,
     private prisma: PrismaService,
     private paymentEventService: PaymentEventService,
+    private payoutExecutor: PayoutExecutorService,
+    private pollingService: PaymentPollingService,
   ) {}
 
-  /**
-   * Blink Lightning Payment Webhook
-   * Called when Lightning invoice is paid or expires
-   *
-   * Webhook Signature Verification:
-   * Header: x-blink-signature = HMAC-SHA256(payload, BLINK_WEBHOOK_SECRET)
-   *
-   * Example payload:
-   * {
-   *   "type": "invoice.completed",
-   *   "data": {
-   *     "invoiceId": "7bc0e87c88c4f181b4723b50bf732b710a65580b3ab6576309cb74a86a2de02a",
-   *     "status": "PAID",
-   *     "amount": 101500,
-   *     "currency": "SAT",
-   *     "paymentHash": "...",
-   *     "description": "INV-1774421373834"
-   *   }
-   * }
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // BLINK LIGHTNING WEBHOOK
+  // Header: x-blink-signature  = HMAC-SHA256(rawBody, BLINK_WEBHOOK_SECRET)
+  // Payload: { type: "invoice.completed", data: { invoiceId, status, amount, currency, description } }
+  // ─────────────────────────────────────────────────────────────────────────
+
   @Post('blink')
-  @ApiOperation({
-    summary: 'Blink Lightning Payment Webhook',
-    description:
-      'Endpoint for Blink to notify about Lightning invoice payment status',
-  })
+  @ApiOperation({ summary: 'Blink Lightning payment webhook' })
   @ApiBody({
     schema: {
       example: {
         type: 'invoice.completed',
         data: {
-          invoiceId: 'invoice_id_here',
+          invoiceId: 'abc123',
           status: 'PAID',
           amount: 101500,
           currency: 'SAT',
-          paymentHash: 'payment_hash_here',
           description: 'INV-1774421373834',
         },
       },
@@ -72,249 +54,270 @@ export class WebhookController {
     @Body() payload: any,
     @Headers('x-blink-signature') signature: string,
   ) {
-    console.log('🔔 Received Blink webhook:', payload.type);
+    this.logger.log(`Blink webhook received: ${payload.type}`);
 
-    // ============================
-    // 1. VERIFY SIGNATURE (OPTIONAL FOR NOW)
-    // ============================
-    // TODO: Verify HMAC-SHA256 signature in production
-    // const blinkSecret = this.configService.get<string>('BLINK_WEBHOOK_SECRET');
-    // if (!this.verifySignature(JSON.stringify(payload), signature, blinkSecret)) {
-    //   throw new UnauthorizedException('Invalid webhook signature');
-    // }
-
-    // ============================
-    // 2. IDEMPOTENCY CHECK - ensure we don't process same webhook twice
-    // ============================
-    const eventId = payload.data?.invoiceId || payload.id;
-    if (!eventId) {
-      throw new BadRequestException(
-        'Missing invoiceId or event identifier in webhook',
-      );
+    // ── 1. Signature verification ──
+    const blinkSecret = this.configService.get<string>('BLINK_WEBHOOK_SECRET');
+    if (blinkSecret && signature) {
+      const expected = createHmac('sha256', blinkSecret)
+        .update(JSON.stringify(payload))
+        .digest('hex');
+      if (signature !== expected) {
+        this.logger.warn('Blink webhook: invalid signature');
+        throw new BadRequestException('Invalid webhook signature');
+      }
     }
 
-    const existingEvent = await this.prisma.webhookEvent.findUnique({
-      where: {
-        eventId,
-      },
-    });
+    // ── 2. Extract event ID for idempotency ──
+    const eventId = payload.data?.invoiceId || payload.id;
+    if (!eventId) {
+      throw new BadRequestException('Missing invoiceId in Blink webhook');
+    }
 
-    if (existingEvent && existingEvent.processed) {
-      console.log(
-        `⏭️  Webhook already processed (idempotency): ${eventId}`,
-      );
+    const existing = await this.prisma.webhookEvent.findUnique({ where: { eventId } });
+    if (existing?.processed) {
+      this.logger.log(`Blink webhook already processed: ${eventId}`);
       return { acknowledged: true };
     }
 
-    // ============================
-    // 3. STORE WEBHOOK EVENT
-    // ============================
+    // ── 3. Store event ──
     const webhookEvent = await this.prisma.webhookEvent.upsert({
       where: { eventId },
-      create: {
-        provider: 'blink',
-        eventId,
-        type: payload.type,
-        payload,
-        processed: false,
-      },
-      update: {
-        payload,
-      },
+      create: { provider: 'blink', eventId, type: payload.type, payload, processed: false },
+      update: { payload },
     });
 
-    console.log(`✅ Webhook stored: ${eventId}`);
-
-    // ============================
-    // 4. PROCESS BASED ON EVENT TYPE
-    // ============================
+    // ── 4. Dispatch by event type ──
     try {
       switch (payload.type) {
         case 'invoice.completed':
         case 'invoice.paid':
-          await this.handleInvoicePaid(payload);
+          await this.handleBlinkPayinConfirmed(payload);
           break;
 
         case 'invoice.expired':
         case 'invoice.failed':
-          await this.handleInvoiceExpired(payload);
+          await this.handleBlinkPayinFailed(payload);
           break;
 
         default:
-          console.warn(`⚠️ Unknown Blink webhook type: ${payload.type}`);
+          this.logger.warn(`Unknown Blink webhook type: ${payload.type}`);
       }
 
-      // ============================
-      // 5. MARK AS PROCESSED
-      // ============================
       await this.prisma.webhookEvent.update({
         where: { id: webhookEvent.id },
         data: { processed: true },
       });
 
-      console.log(`✅ Webhook processed successfully: ${eventId}`);
-
-      return {
-        success: true,
-        message: 'Webhook processed',
-      };
+      return { success: true };
     } catch (error) {
-      console.error(`❌ Error processing webhook ${eventId}:`, error);
+      this.logger.error(`Error processing Blink webhook ${eventId}:`, error);
       throw error;
     }
   }
 
-  /**
-   * Handle invoice paid event
-   * Update PaymentAttempt status and emit event
-   */
-  private async handleInvoicePaid(payload: any) {
-    const { invoiceId, status, amount, currency, paymentHash, description } =
-      payload.data;
+  // ─────────────────────────────────────────────────────────────────────────
+  // NETWALLETPAY WEBHOOK
+  // Header: x-callbacktoken = SHA256("{orderId}_{secondaryKey}")
+  // Payload: { Status: "SUCCESS", TransactionId: "MMM..." }
+  // Both collection (payin) and payout share the same callback URL.
+  // We distinguish them by matching TransactionId against PaymentAttempt.externalRef
+  // (payin) or PayoutAttempt.externalRef (payout).
+  // ─────────────────────────────────────────────────────────────────────────
 
-    console.log(
-      `⚡ Processing Lightning invoice paid: ${invoiceId.substring(0, 16)}...`,
-    );
+  @Post('netwalletpay')
+  @ApiOperation({ summary: 'Netwalletpay collection/payout status webhook' })
+  async handleNetwalletpayWebhook(
+    @Body() payload: any,
+    @Headers('x-callbacktoken') callbackToken?: string,
+  ) {
+    const transactionId: string =
+      payload.TransactionId || payload.transactionId || payload.reference || payload.id;
+    const status: string = (payload.Status || payload.status || '').toUpperCase();
 
-    // Find PaymentAttempt by external reference
-    const attempt = await this.prisma.paymentAttempt.findFirst({
-      where: {
-        externalRef: invoiceId,
-      },
-      include: {
-        invoice: true,
-        currency: true,
-      },
-    });
+    this.logger.log(`Netwalletpay webhook: ${transactionId} → ${status}`);
 
-    if (!attempt) {
-      console.warn(
-        `⚠️ PaymentAttempt not found for invoice: ${invoiceId}`,
-      );
-      return;
+    if (!transactionId) {
+      throw new BadRequestException('Missing TransactionId in Netwalletpay webhook');
     }
 
-    console.log(
-      `✅ Found PaymentAttempt: ${attempt.id} for invoice: ${attempt.invoice.reference}`,
-    );
+    // ── 1. Optional token verification ──
+    const secondaryKey = this.configService.get<string>('NETWALLETPAY_SECONDARY_KEY');
+    if (secondaryKey && callbackToken) {
+      // Netwalletpay signs the callback as SHA256("{orderId}_{secondaryKey}")
+      // The orderId inside the TransactionId varies per provider; we verify leniently.
+      // In production, extract the orderId from the attempt record and compare.
+      this.verifyNetwalletpayToken(callbackToken, transactionId, secondaryKey);
+    }
 
-    // ============================
-    // UPDATE PAYMENT ATTEMPT
-    // ============================
-    const updatedAttempt = await this.prisma.paymentAttempt.update({
-      where: { id: attempt.id },
+    // ── 2. Idempotency ──
+    const existing = await this.prisma.webhookEvent.findUnique({ where: { eventId: transactionId } });
+    if (existing?.processed) {
+      this.logger.log(`Netwalletpay webhook already processed: ${transactionId}`);
+      return { status: 'DUPLICATE' };
+    }
+
+    const webhookEvent = await this.prisma.webhookEvent.create({
       data: {
-        status: 'SUCCESS',
-        providerResponse: {
-          ...payload.data,
-          confirmedAt: new Date(),
-        },
+        eventId: transactionId,
+        provider: 'netwalletpay',
+        type: status || 'netwalletpay.callback',
+        payload,
+        processed: false,
       },
     });
 
-    // ============================
-    // UPDATE INVOICE STATUS
-    // ============================
-    const updatedInvoice = await this.prisma.paymentInvoice.update({
-      where: { id: attempt.invoice.id },
-      data: {
-        status: 'SUCCESS',
-      },
-    });
+    // ── 3. Determine whether this is a payin or payout confirmation ──
+    try {
+      const payinAttempt = await this.prisma.paymentAttempt.findFirst({
+        where: { externalRef: transactionId },
+        include: { invoice: true, currency: true },
+      });
 
-    console.log(
-      `✅ Invoice updated to SUCCESS: ${updatedInvoice.reference}`,
-    );
+      const payoutAttempt = await this.prisma.payoutAttempt.findFirst({
+        where: { externalRef: transactionId },
+        include: { payout: { include: { invoice: true } } },
+      });
 
-    // ============================
-    // EMIT EVENT FOR WEBSOCKET
-    // ============================
-    await this.paymentEventService.emitWebhookPayment({
-      provider: 'blink',
-      eventType: 'payment.confirmed',
-      invoiceId: attempt.invoice.id,
-      externalRef: invoiceId,
-      status: 'SUCCESS',
-      amount: Number(amount),
-      currency: currency,
-      payload: payload.data,
-      timestamp: new Date(),
-    });
+      if (status === 'SUCCESS' || status === 'COMPLETED') {
+        if (payinAttempt) {
+          await this.confirmPayin(
+            payinAttempt,
+            transactionId,
+            payload as Record<string, unknown>,
+          );
+        }
+        if (payoutAttempt) {
+          await this.payoutExecutor.confirmPayout(transactionId);
+          this.logger.log(`Payout confirmed: ${transactionId}`);
+        }
+      } else if (status === 'FAILED' || status === 'CANCELLED' || status === 'TIMEOUT') {
+        if (payinAttempt) {
+          await this.failPayin(payinAttempt, status);
+        }
+        if (payoutAttempt) {
+          await this.payoutExecutor.failPayout(transactionId, status);
+        }
+      } else {
+        this.logger.log(`Netwalletpay webhook status PENDING/UNKNOWN for ${transactionId} — no action`);
+      }
 
-    // Emit to user WebSocket connection
-    if (attempt.invoice.createdById) {
-      await this.paymentEventService.notifyUser(
-        attempt.invoice.createdById,
-        {
-          invoiceId: attempt.invoice.id,
-          invoiceReference: attempt.invoice.reference,
-          status: 'SUCCESS',
-          paymentMethod: attempt.method,
-          payoutMethod: attempt.invoice.payoutMethod,
-          amount: Number(attempt.amount),
-          currency: attempt.currency.id,
-          paymentDetails: {
-            status: 'PAID',
-            invoiceId: invoiceId,
-            paymentHash: paymentHash,
-          },
-          timestamp: new Date(),
-        },
-      );
+      await this.prisma.webhookEvent.update({
+        where: { id: webhookEvent.id },
+        data: { processed: true },
+      });
+
+      return { status: 'OK' };
+    } catch (error) {
+      this.logger.error(`Error processing Netwalletpay webhook ${transactionId}:`, error);
+      throw error;
     }
   }
 
-  /**
-   * Handle invoice expired/failed event
-   * Update PaymentAttempt status to FAILED
-   */
-  private async handleInvoiceExpired(payload: any) {
-    const { invoiceId, status, reason } = payload.data;
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIVATE HELPERS
+  // ─────────────────────────────────────────────────────────────────────────
 
-    console.log(`⚠️ Processing Lightning invoice expired/failed: ${invoiceId}`);
+  /** Blink: invoice confirmed paid → mark attempt SUCCESS → trigger payout */
+  private async handleBlinkPayinConfirmed(payload: any) {
+    const { invoiceId, amount, currency, description } = payload.data ?? {};
 
     const attempt = await this.prisma.paymentAttempt.findFirst({
-      where: {
-        externalRef: invoiceId,
-      },
-      include: {
-        invoice: true,
-      },
+      where: { externalRef: invoiceId },
+      include: { invoice: true, currency: true },
     });
 
     if (!attempt) {
-      console.warn(`⚠️ PaymentAttempt not found for invoice: ${invoiceId}`);
+      this.logger.warn(`No PaymentAttempt found for Blink invoiceId: ${invoiceId}`);
       return;
     }
 
-    // ============================
-    // UPDATE TO FAILED
-    // ============================
     await this.prisma.paymentAttempt.update({
       where: { id: attempt.id },
       data: {
-        status: 'FAILED',
-        failureReason: reason || status,
-        providerResponse: payload.data,
+        status: TransactionStatus.SUCCESS,
+        providerResponse: { ...payload.data, confirmedAt: new Date() },
       },
+    });
+
+    this.logger.log(`Blink payin confirmed: ${attempt.invoice.reference}`);
+
+    // Trigger payout and start payout polling for async confirmation
+    await this.paymentEventService.emitPaymentComplete({
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
+      status: 'PROCESSING',
+      stage: 'PAYER_CONFIRMED',
+      paymentMethod: attempt.method as string,
+      payoutMethod: attempt.invoice.payoutMethod,
+      amount: Number(attempt.amount),
+      currency: attempt.currency.code,
+      paymentDetails: { status: 'PAID', transactionId: invoiceId },
+      timestamp: new Date(),
+      userId: attempt.invoice.createdById ?? undefined,
+    });
+
+    const payoutResult = await this.payoutExecutor.execute(attempt.invoiceId);
+    if (payoutResult?.payoutAttemptId && payoutResult.payoutExternalRef) {
+      this.pollingService.startPayoutPoll({
+        invoiceId: attempt.invoiceId,
+        payoutId: payoutResult.payoutId,
+        payoutAttemptId: payoutResult.payoutAttemptId,
+        externalRef: payoutResult.payoutExternalRef,
+        provider: this.resolvePayoutPollingProvider(String(attempt.invoice.payoutMethod)),
+      });
+    }
+
+    await this.paymentEventService.emitWebhookPayment({
+      provider: 'blink',
+      eventType: 'payment.confirmed',
+      stage: 'PAYER_CONFIRMED',
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
+      externalRef: invoiceId,
+      status: 'SUCCESS',
+      amount: Number(amount),
+      currency,
+      payload: payload.data,
+      timestamp: new Date(),
+    });
+  }
+
+  /** Blink: invoice expired/failed → mark FAILED, no payout */
+  private async handleBlinkPayinFailed(payload: any) {
+    const { invoiceId, status, reason } = payload.data ?? {};
+
+    const attempt = await this.prisma.paymentAttempt.findFirst({
+      where: { externalRef: invoiceId },
+      include: { invoice: true },
+    });
+
+    if (!attempt) return;
+
+    await this.prisma.paymentAttempt.update({
+      where: { id: attempt.id },
+      data: { status: TransactionStatus.FAILED, failureReason: reason || status, providerResponse: payload.data },
     });
 
     await this.prisma.paymentInvoice.update({
-      where: { id: attempt.invoice.id },
-      data: {
-        status: 'FAILED',
+      where: { id: attempt.invoiceId },
+      data: { status: TransactionStatus.FAILED },
+    });
+    await this.prisma.paymentRequest.updateMany({
+      where: {
+        metadata: { path: ['invoiceId'], equals: attempt.invoiceId },
       },
+      data: { status: TransactionStatus.FAILED },
     });
 
-    console.log(`❌ Invoice marked as FAILED: ${attempt.invoice.reference}`);
+    this.logger.log(`Blink payin FAILED: ${attempt.invoice.reference}`);
 
-    // ============================
-    // EMIT FAILURE EVENT
-    // ============================
     await this.paymentEventService.emitWebhookPayment({
       provider: 'blink',
       eventType: 'payment.failed',
-      invoiceId: attempt.invoice.id,
+      stage: 'FAILED',
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
       externalRef: invoiceId,
       status: 'FAILED',
       failureReason: reason || status,
@@ -323,268 +326,136 @@ export class WebhookController {
     });
 
     if (attempt.invoice.createdById) {
-      await this.paymentEventService.notifyUser(
-        attempt.invoice.createdById,
-        {
-          invoiceId: attempt.invoice.id,
-          invoiceReference: attempt.invoice.reference,
-          status: 'FAILED',
-          paymentMethod: attempt.method,
-          payoutMethod: attempt.invoice.payoutMethod,
-          amount: Number(attempt.amount),
-          currency: attempt.currency.id,
-          timestamp: new Date(),
-        },
-      );
+      await this.paymentEventService.notifyUser(attempt.invoice.createdById, {
+        invoiceId: attempt.invoiceId,
+        invoiceReference: attempt.invoice.reference,
+        status: 'FAILED',
+        stage: 'FAILED',
+        paymentMethod: attempt.method as string,
+        payoutMethod: attempt.invoice.payoutMethod,
+        amount: Number(attempt.amount),
+        currency: attempt.currencyId,
+        timestamp: new Date(),
+      });
     }
   }
 
   /**
-   * Verify HMAC-SHA256 signature (for production use)
+   * Netwalletpay: payin confirmed → update attempt SUCCESS → trigger payout
    */
-  private verifySignature(
-    payload: string,
-    signature: string,
-    secret: string,
-  ): boolean {
-    // Implementation would use crypto.createHmac
-    // This is a placeholder - implement in production
-    return true; // TODO: Implement proper signature verification
-  }
-
-  /**
-   * Netwalletpay Webhook Handler
-   * Processes payment status updates from Netwalletpay
-   */
-  @Post('netwalletpay')
-  @ApiOperation({
-    summary: 'Netwalletpay webhook for payment status updates',
-    description: 'Receives payment confirmations from Netwalletpay'
-  })
-  async handleNetwalletpayWebhook(
-    @Body() payload: any,
-    @Headers('x-netwalletpay-signature') signature?: string,
+  private async confirmPayin(
+    attempt: { id: string; invoiceId: string; method: string; amount: unknown; currencyId: string; invoice: { reference: string; createdById: string | null; payoutMethod: string } },
+    transactionId: string,
+    payload: Record<string, unknown>,
   ) {
-    console.log('🔄 Netwalletpay webhook received:', payload);
-
-    let eventId: string = '';
-
-    try {
-      // ============================
-      // 1. VERIFY SIGNATURE (Production)
-      // ============================
-      // const netwalletpaySecret = this.configService.get<string>('NETWALLETPAY_WEBHOOK_SECRET');
-      // if (!this.verifySignature(JSON.stringify(payload), signature, netwalletpaySecret)) {
-      //   throw new UnauthorizedException('Invalid webhook signature');
-      // }
-
-      // ============================
-      // 2. IDEMPOTENCY CHECK
-      // ============================
-      eventId = payload.TransactionId || payload.transactionId || payload.reference || payload.id;
-      if (!eventId) {
-        throw new BadRequestException('Missing transaction identifier in Netwalletpay webhook');
-      }
-
-      const existingEvent = await this.prisma.webhookEvent.findUnique({
-        where: { eventId },
-      });
-
-      if (existingEvent) {
-        console.log(`⚠️ Duplicate Netwalletpay webhook: ${eventId}`);
-        return { status: 'DUPLICATE' };
-      }
-
-      // ============================
-      // 3. STORE WEBHOOK EVENT
-      // ============================
-      const webhookEvent = await this.prisma.webhookEvent.create({
-        data: {
-          eventId,
-          provider: 'netwalletpay',
-          eventType: payload.status || payload.eventType,
-          payload,
-          processed: false,
-        },
-      });
-
-      // ============================
-      // 4. PROCESS PAYMENT STATUS
-      // ============================
-      const status = payload.Status || payload.status;
-
-      switch (status) {
-        case 'SUCCESS':
-        case 'COMPLETED':
-          await this.handleNetwalletpayPaymentSuccess(payload);
-          break;
-
-        case 'FAILED':
-        case 'CANCELLED':
-        case 'TIMEOUT':
-          await this.handleNetwalletpayPaymentFailed(payload);
-          break;
-
-        case 'PENDING':
-          console.log(`⏳ Netwalletpay payment pending: ${eventId}`);
-          break;
-
-        default:
-          console.warn(`⚠️ Unknown Netwalletpay status: ${status}`);
-      }
-
-      // ============================
-      // 5. MARK AS PROCESSED
-      // ============================
-      await this.prisma.webhookEvent.update({
-        where: { id: webhookEvent.id },
-        data: { processed: true },
-      });
-
-      return { status: 'OK' };
-
-    } catch (error) {
-      console.error(`❌ Error processing Netwalletpay webhook ${eventId}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Handle successful Netwalletpay payment
-   */
-  private async handleNetwalletpayPaymentSuccess(payload: any) {
-    const transactionId = payload.TransactionId || payload.transactionId;
-
-    console.log(`✅ Processing Netwalletpay payment success: ${transactionId}`);
-
-    // Find PaymentAttempt by external reference
-    const attempt = await this.prisma.paymentAttempt.findFirst({
-      where: { externalRef: transactionId },
-      include: { invoice: true },
-    });
-
-    if (!attempt) {
-      console.warn(`⚠️ Payment attempt not found for Netwalletpay transaction: ${transactionId}`);
-      return;
-    }
-
-    // Update attempt status
     await this.prisma.paymentAttempt.update({
       where: { id: attempt.id },
       data: {
         status: TransactionStatus.SUCCESS,
+        providerResponse: { ...payload, confirmedAt: new Date() },
       },
     });
 
-    // Update invoice status
-    await this.prisma.paymentInvoice.update({
-      where: { id: attempt.invoice.id },
-      data: {
-        status: TransactionStatus.SUCCESS,
-      },
+    this.logger.log(`Netwalletpay payin confirmed: ${attempt.invoice.reference}`);
+
+    // Trigger payout and start payout polling for async confirmation
+    await this.paymentEventService.emitPaymentComplete({
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
+      status: 'PROCESSING',
+      stage: 'PAYER_CONFIRMED',
+      paymentMethod: attempt.method as string,
+      payoutMethod: attempt.invoice.payoutMethod,
+      amount: Number(attempt.amount),
+      currency: attempt.currencyId,
+      paymentDetails: { status: 'PAID', transactionId },
+      timestamp: new Date(),
+      userId: attempt.invoice.createdById ?? undefined,
     });
 
-    console.log(`✅ Netwalletpay payment updated to SUCCESS: ${attempt.invoice.reference}`);
+    const payoutResult = await this.payoutExecutor.execute(attempt.invoiceId);
+    if (payoutResult?.payoutAttemptId && payoutResult.payoutExternalRef) {
+      this.pollingService.startPayoutPoll({
+        invoiceId: attempt.invoiceId,
+        payoutId: payoutResult.payoutId,
+        payoutAttemptId: payoutResult.payoutAttemptId,
+        externalRef: payoutResult.payoutExternalRef,
+        provider: this.resolvePayoutPollingProvider(String(attempt.invoice.payoutMethod)),
+      });
+    }
 
-    // ============================
-    // EMIT EVENT FOR WEBSOCKET
-    // ============================
     await this.paymentEventService.emitWebhookPayment({
       provider: 'netwalletpay',
       eventType: 'payment.confirmed',
-      invoiceId: attempt.invoice.id,
+      stage: 'PAYER_CONFIRMED',
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
       externalRef: transactionId,
       status: 'SUCCESS',
       amount: Number(attempt.amount),
-      currency: attempt.currency,
-      payload: payload,
+      currency: attempt.currencyId,
+      payload,
       timestamp: new Date(),
     });
 
-    // Notify user via WebSocket
+  }
+
+  /** Netwalletpay: payin failed → mark FAILED, no payout */
+  private async failPayin(attempt: any, reason: string) {
+    await this.prisma.paymentAttempt.update({
+      where: { id: attempt.id },
+      data: { status: TransactionStatus.FAILED, failureReason: reason },
+    });
+
+    await this.prisma.paymentInvoice.update({
+      where: { id: attempt.invoiceId },
+      data: { status: TransactionStatus.FAILED },
+    });
+    await this.prisma.paymentRequest.updateMany({
+      where: {
+        metadata: { path: ['invoiceId'], equals: attempt.invoiceId },
+      },
+      data: { status: TransactionStatus.FAILED },
+    });
+
+    this.logger.log(`Netwalletpay payin FAILED: ${attempt.invoice.reference} (${reason})`);
+
     if (attempt.invoice.createdById) {
-      await this.paymentEventService.notifyUser(
-        attempt.invoice.createdById,
-        {
-          invoiceId: attempt.invoice.id,
-          invoiceReference: attempt.invoice.reference,
-          status: 'SUCCESS',
-          paymentMethod: attempt.method,
-          payoutMethod: attempt.invoice.payoutMethod,
-          amount: Number(attempt.amount),
-          currency: attempt.currency.id,
-          paymentDetails: payload,
-          timestamp: new Date(),
-        },
-      );
+      await this.paymentEventService.notifyUser(attempt.invoice.createdById, {
+        invoiceId: attempt.invoiceId,
+        invoiceReference: attempt.invoice.reference,
+        status: 'FAILED',
+        stage: 'FAILED',
+        paymentMethod: attempt.method as string,
+        payoutMethod: attempt.invoice.payoutMethod,
+        amount: Number(attempt.amount),
+        currency: attempt.currencyId,
+        timestamp: new Date(),
+      });
     }
   }
 
+  /** Map invoice payoutMethod to the correct polling provider. */
+  private resolvePayoutPollingProvider(payoutMethod: string): PollingProvider {
+    const m = (payoutMethod ?? '').toUpperCase();
+    if (m === 'LIGHTNING' || m === 'BTC') return 'blink';
+    return 'netwalletpay';
+  }
+
   /**
-   * Handle failed Netwalletpay payment
+   * Verify Netwalletpay X-CallbackToken.
+   * Token = SHA256("{orderId}_{secondaryKey}") — orderId is the numeric part of the reference.
+   * We check leniently (log warning, don't throw) since the orderId in the token
+   * may differ from the TransactionId; use strict mode once you confirm the format.
    */
-  private async handleNetwalletpayPaymentFailed(payload: any) {
-    const transactionId = payload.TransactionId || payload.transactionId;
-    const reason = payload.reason || payload.error || 'Payment failed';
+  private verifyNetwalletpayToken(token: string, transactionId: string, secondaryKey: string) {
+    const expected = createHash('sha256')
+      .update(`${transactionId}_${secondaryKey}`)
+      .digest('hex');
 
-    console.log(`❌ Processing Netwalletpay payment failed: ${transactionId} - ${reason}`);
-
-    const attempt = await this.prisma.paymentAttempt.findFirst({
-      where: { externalRef: transactionId },
-      include: { invoice: true },
-    });
-
-    if (!attempt) {
-      console.warn(`⚠️ Payment attempt not found for failed Netwalletpay transaction: ${transactionId}`);
-      return;
-    }
-
-    // Update attempt status to FAILED
-    await this.prisma.paymentAttempt.update({
-      where: { id: attempt.id },
-      data: {
-        status: TransactionStatus.FAILED,
-      },
-    });
-
-    // Update invoice status
-    await this.prisma.paymentInvoice.update({
-      where: { id: attempt.invoice.id },
-      data: {
-        status: TransactionStatus.FAILED,
-      },
-    });
-
-    console.log(`❌ Netwalletpay payment marked as FAILED: ${attempt.invoice.reference}`);
-
-    // ============================
-    // EMIT FAILURE EVENT
-    // ============================
-    await this.paymentEventService.emitWebhookPayment({
-      provider: 'netwalletpay',
-      eventType: 'payment.failed',
-      invoiceId: attempt.invoice.id,
-      externalRef: transactionId,
-      status: 'FAILED',
-      failureReason: reason || payload.status,
-      payload: payload,
-      timestamp: new Date(),
-    });
-
-    // Notify user of failure
-    if (attempt.invoice.createdById) {
-      await this.paymentEventService.notifyUser(
-        attempt.invoice.createdById,
-        {
-          invoiceId: attempt.invoice.id,
-          invoiceReference: attempt.invoice.reference,
-          status: 'FAILED',
-          paymentMethod: attempt.method,
-          payoutMethod: attempt.invoice.payoutMethod,
-          amount: Number(attempt.amount),
-          currency: attempt.currency.id,
-          timestamp: new Date(),
-        },
+    if (token !== expected) {
+      this.logger.warn(
+        `Netwalletpay callback token mismatch for ${transactionId} — proceeding (verify format in production)`,
       );
     }
   }

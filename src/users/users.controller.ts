@@ -54,6 +54,15 @@ export class UsersController {
   }
 
   // =====================================================
+  // 📋 GET TRANSACTION HISTORY
+  // =====================================================
+  @Get('me/transactions')
+  @ApiOperation({ summary: 'Get current user transaction history' })
+  getMyTransactions(@CurrentUser() user: any) {
+    return this.usersService.getMyTransactions(user.userId);
+  }
+
+  // =====================================================
   // 🖼️ UPLOAD PROFILE PICTURE
   // =====================================================
   @Patch('upload-profile-picture')

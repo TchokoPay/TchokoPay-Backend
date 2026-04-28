@@ -3,31 +3,53 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module.js';
 import cookieParser from 'cookie-parser';
-
 import helmet from 'helmet';
-
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 
-// 🔐 Global Auth Guard
-import { JwtAuthGuard } from './auth/guards/jwt.guard.js';
-import { APP_GUARD } from '@nestjs/core';
+function parseOrigins(value?: string) {
+  return (value ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function getAllowedOrigins() {
+  const configuredOrigins = [
+    ...parseOrigins(process.env.CORS_ORIGINS),
+    ...parseOrigins(process.env.FRONTEND_URLS),
+    ...parseOrigins(process.env.FRONTEND_URL),
+    ...parseOrigins(process.env.APP_URL),
+  ];
+
+  const defaultOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:5173',
+  ];
+
+  return Array.from(new Set([...configuredOrigins, ...defaultOrigins]));
+}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // 🛡️ Security headers
   app.use(helmet());
 
-  // 🌍 CORS (adjust for your frontend)
+  const allowedOrigins = getAllowedOrigins();
   app.enableCors({
-    origin: ['http://localhost:3000', 'http://localhost:5173'],
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS blocked for origin: ${origin}`), false);
+    },
     credentials: true,
   });
 
-  // 🍪 Cookies
   app.use(cookieParser());
 
-  // ✅ Validation globally
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -35,14 +57,11 @@ async function bootstrap() {
     }),
   );
 
-  // 🔐 GLOBAL JWT GUARD (configured in AuthModule with APP_GUARD)
-
-  // 📘 Swagger setup
   const config = new DocumentBuilder()
     .setTitle('TchokoPay API')
     .setDescription('TchokoPay backend API documentation')
     .setVersion('1.0')
-    .addBearerAuth() // enables "Authorize" button in Swagger
+    .addBearerAuth()
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

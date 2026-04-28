@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { PaymentProvider } from './base/payment-provider.interface.js';
@@ -124,6 +125,16 @@ export class NetwalletpayProvider implements PaymentProvider {
     }
   }
 
+  private computeHash(orderId: string): string {
+    return createHash('sha256')
+      .update(`${orderId}_${this.config.secondaryKey}`)
+      .digest('hex');
+  }
+
+  private normalizeOrderId(reference: string): string {
+    return (reference || '').trim().replace(/^(INV|REQ)-/i, '');
+  }
+
   async payin(data: PayinDto): Promise<any> {
     const { amount, currency, reference, phone, metadata } = data;
 
@@ -155,16 +166,18 @@ export class NetwalletpayProvider implements PaymentProvider {
       });
 
       // Build collection request payload using API spec parameter names
+      const orderId = this.normalizeOrderId(reference);
       const payload: any = {
         CurrencyCode: currency,
-        OrderID: reference.replace('INV-', ''), // Use just the numeric part of the reference
-        Amount: Number(amount), // Keep decimal precision for accurate amounts
+        OrderID: orderId,
+        Amount: Number(amount),
         Method: method,
         CountryCode: country,
         MethodProvider: providerId,
-        PhoneNumber: formattedPhone, // Use formatted phone with country code
+        PhoneNumber: formattedPhone,
         Description: `Payment for ${reference}`,
-        CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`, // Add callback URL for status updates
+        CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`,
+        Hash: this.computeHash(orderId),
       };
 
       // Add MethodType only for MOBILE_MONEY method in Cameroon
@@ -174,7 +187,7 @@ export class NetwalletpayProvider implements PaymentProvider {
 
       this.logger.log(`💲 PAYIN Request Payload:`, payload);
       this.logger.log(`📱 Formatted phone: ${phone} → ${formattedPhone}`);
-      this.logger.log(`🆔 OrderID: ${reference} → ${reference.replace('INV-', '')}`);
+      this.logger.log(`🆔 OrderID: ${reference} → ${orderId}`);
 
       // Validate required parameters
       const requiredParams = ['CurrencyCode', 'OrderID', 'Amount', 'Method', 'CountryCode', 'MethodProvider', 'PhoneNumber'];
@@ -246,16 +259,18 @@ export class NetwalletpayProvider implements PaymentProvider {
       });
 
       // Build payout request payload using API spec parameter names
+      const orderId = this.normalizeOrderId(reference);
       const payload: any = {
         CurrencyCode: currency,
-        OrderID: reference.replace('INV-', ''), // Use just the numeric part of the reference
-        Amount: Number(amount), // Keep decimal precision for accurate amounts
+        OrderID: orderId,
+        Amount: Number(amount),
         Method: method,
         CountryCode: country,
         MethodProvider: providerId,
-        PhoneNumber: formattedPhone, // Use formatted phone with country code
+        PhoneNumber: formattedPhone,
         Description: `Payout for ${reference}`,
-        CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`, // Add callback URL for status updates
+        CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`,
+        Hash: this.computeHash(orderId),
       };
 
       // Add MethodType only for MOBILE_MONEY method
@@ -265,7 +280,7 @@ export class NetwalletpayProvider implements PaymentProvider {
 
       this.logger.log(`💲 PAYOUT Request Payload:`, payload);
       this.logger.log(`📱 Formatted phone: ${phone} → ${formattedPhone}`);
-      this.logger.log(`🆔 OrderID: ${reference} → ${reference.replace('INV-', '')}`);
+      this.logger.log(`🆔 OrderID: ${reference} → ${orderId}`);
 
       // Validate required parameters
       const requiredParams = ['CurrencyCode', 'OrderID', 'Amount', 'Method', 'CountryCode', 'MethodProvider', 'PhoneNumber'];
@@ -286,12 +301,53 @@ export class NetwalletpayProvider implements PaymentProvider {
         statusCode: response.statusCode,
         message: response.message,
       });
+
+      return {
+        status: 'SUCCESS',
+        transactionId: response.data,
+        provider: providerInfo?.name,
+        method,
+        country,
+      };
     } catch (error) {
       this.logger.error(`❌ Netwalletpay PAYOUT failed:`, error);
       return {
         status: 'FAILED',
         error: (error as Error).message,
       };
+    }
+  }
+
+  /**
+   * Poll the Netwalletpay API for a transaction's current status.
+   * Returns a normalised status: 'SUCCESS' | 'FAILED' | 'PENDING'
+   */
+  async checkTransactionStatus(transactionId: string): Promise<{
+    status: 'SUCCESS' | 'FAILED' | 'PENDING';
+    raw: any;
+  }> {
+    try {
+      const response = await this.makeApiRequest(
+        'GET',
+        `/api/v1/global/transaction-status/${transactionId}`,
+      );
+
+      const raw = response.data ?? response;
+      const apiStatus = (raw?.status ?? '').toUpperCase();
+
+      let status: 'SUCCESS' | 'FAILED' | 'PENDING';
+      if (apiStatus === 'SUCCESS' || apiStatus === 'COMPLETED') {
+        status = 'SUCCESS';
+      } else if (apiStatus === 'FAILED' || apiStatus === 'CANCELLED' || apiStatus === 'TIMEOUT') {
+        status = 'FAILED';
+      } else {
+        status = 'PENDING';
+      }
+
+      return { status, raw };
+    } catch (error) {
+      this.logger.error(`checkTransactionStatus failed for ${transactionId}:`, error);
+      return { status: 'PENDING', raw: null };
     }
   }
 
@@ -463,17 +519,17 @@ export class NetwalletpayProvider implements PaymentProvider {
 
     // provider-specific method types with prioritized order per Netwalletpay docs
     if (normalizedId.includes('mtn')) {
-      candidates.push('MOMO', 'momo', 'MOBILE_MONEY');
+      candidates.push('MOMO', 'EU');
     } else if (normalizedId.includes('orange')) {
-      candidates.push('ORANGE_MONEY', 'orange_money', 'MOMO');
+      candidates.push('ORANGE_MONEY', 'EU', 'MOMO');
     } else if (normalizedId.includes('eu')) {
-      candidates.push('EU', 'MOMO');
+      candidates.push('EU', 'MOMO', 'ORANGE_MONEY');
     } else if (normalizedId.includes('netwallet')) {
-      candidates.push('MOMO', 'NETWALLET_PAY');
+      candidates.push('MOMO', 'EU', 'ORANGE_MONEY');
     }
 
-    // Add generic fallbacks
-    candidates.push('MOMO', 'MOBILE_MONEY', '');
+    // Generic fallbacks
+    candidates.push('MOMO', 'EU', 'ORANGE_MONEY');
 
     // Remove duplicates keeping order
     return Array.from(new Set(candidates));
@@ -486,7 +542,7 @@ export class NetwalletpayProvider implements PaymentProvider {
     try {
       // Query DB for first available provider for this country/method
       // Order by providerCode to ensure MTN (mtn_cm) is preferred when multiple providers exist
-      const provider = await this.prisma.paymentProvider.findFirst({
+      const allProviders = await this.prisma.paymentProvider.findMany({
         where: {
           country: { iso2: country, isActive: true },
           method: { code: method, isActive: true },
@@ -496,20 +552,24 @@ export class NetwalletpayProvider implements PaymentProvider {
           country: { include: { currency: true } },
           method: true,
         },
-        orderBy: { providerCode: 'asc' }, // mtn_cm < orange_cm < eu_cm < netwallet_cm
       });
+
+      const priority = ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm'];
+      const provider = allProviders.length
+        ? (priority.reduce<(typeof allProviders)[0] | null>((found, code) => found ?? allProviders.find(p => p.providerCode === code) ?? null, null) ?? allProviders[0])
+        : null;
 
       if (provider) {
         return {
           id: provider.providerCode,
           name: provider.name,
-          methodType: provider.requiresType ? method : '',
+          methodType: provider.requiresType ? this.getMethodTypeForProvider(provider.providerCode) : '',
           country,
           transactionCurrency: provider.country.currency?.code || 'USD',
         };
       }
 
-      // If no provider found for this method, get any provider for the country (still ordered by code)
+      // Fallback: any active provider for this country
       const anyProvider = await this.prisma.paymentProvider.findFirst({
         where: {
           country: { iso2: country, isActive: true },
@@ -519,7 +579,6 @@ export class NetwalletpayProvider implements PaymentProvider {
           country: { include: { currency: true } },
           method: true,
         },
-        orderBy: { providerCode: 'asc' },
       });
 
       if (anyProvider) {
@@ -558,31 +617,26 @@ export class NetwalletpayProvider implements PaymentProvider {
   private async getProviderFromDb(country: NetwalletpayCountry, method: NetwalletpayMethod): Promise<any | null> {
     const mappedMethod = method === 'NETWALLET_PAY' ? 'NETWALLET_PAY' : method;
 
-    // Order by providerCode (asc) ensures MTN (mtn_cm) is selected first when multiple providers exist
-    const provider = await this.prisma.paymentProvider.findFirst({
+    const providers = await this.prisma.paymentProvider.findMany({
       where: {
-        country: {
-          iso2: country,
-          isActive: true,
-        },
-        method: {
-          code: mappedMethod,
-          isActive: true,
-        },
+        country: { iso2: country, isActive: true },
+        method: { code: mappedMethod, isActive: true },
         isActive: true,
       },
       include: {
-        country: {
-          include: {
-            currency: true,
-          },
-        },
+        country: { include: { currency: true } },
         method: true,
       },
-      orderBy: { providerCode: 'asc' }, // Ensures mtn_cm is preferred
     });
 
-    if (!provider) return null;
+    if (!providers.length) return null;
+
+    // Priority order for CM MOBILE_MONEY: mtn_cm → orange_cm → netwallet_cm → eu_cm
+    // mtn_cm is the most reliable direct carrier; eu_cm tends to cause 500s
+    const priority = ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm'];
+    const provider =
+      priority.reduce<(typeof providers)[0] | null>((found, code) => found ?? providers.find(p => p.providerCode === code) ?? null, null) ??
+      providers[0];
 
     return {
       id: provider.providerCode,
@@ -701,71 +755,36 @@ export class NetwalletpayProvider implements PaymentProvider {
   }
 
   /**
-   * Get method-specific fields for API requests
-   */
-  private getMethodSpecificFields(method: NetwalletpayMethod, request: PayinDto | PayoutDto): any {
-    const baseFields: any = {};
-
-    switch (method) {
-      case 'MOBILE_MONEY':
-        // Mobile money requires phone number
-        if (request.phone) {
-          baseFields.phone = request.phone;
-        }
-        break;
-
-      case 'CARD':
-        // Card payments may require additional card details
-        // These would come from frontend tokenization
-        break;
-
-      case 'BANK':
-        // Bank transfers may require account details
-        break;
-
-      case 'CRYPTO':
-        // Crypto payments may require wallet address
-        break;
-
-      case 'NETWALLET_PAY':
-        // Netwallet Pay specific fields
-        break;
-    }
-
-    return baseFields;
-  }
-
-  /**
    * Format phone number for API (ensure international format with country code)
    */
   private async formatPhoneNumber(phone: string, country: NetwalletpayCountry): Promise<string> {
     if (!phone) return phone;
 
-    // Remove any existing + or spaces/dashes
+    // Strip +, spaces, dashes, parentheses
     let cleanPhone = phone.replace(/[\s+\-\(\)]/g, '');
 
-    // Get dial code from DB or cache
     const dialCode = await this.getCountryDialCode(country);
-    const countryDigits = dialCode.replace('+', '');
+    const countryDigits = dialCode.replace('+', ''); // e.g. "237" for Cameroon
 
-    // If it already starts with country code digits, ensure + prefix
+    // Already has country code prefix — return as-is (no + sign: API expects "237XXXXXXXXX")
     if (cleanPhone.startsWith(countryDigits)) {
-      return '+' + cleanPhone;
+      this.logger.log(`📱 Phone formatting: ${phone} → ${cleanPhone} (country: ${country})`);
+      return cleanPhone;
     }
 
-    // If it starts with 00 (international dialing), convert to +
+    // International dialing prefix 00 → strip it, the remaining should already include country code
     if (cleanPhone.startsWith('00')) {
-      return '+' + cleanPhone.substring(2);
+      const formatted = cleanPhone.substring(2);
+      this.logger.log(`📱 Phone formatting: ${phone} → ${formatted} (country: ${country})`);
+      return formatted;
     }
 
-    // If it starts with just the local number (no country code), add country code
-    // Remove leading 0 if present (common in African numbers)
+    // Local number — strip leading 0 if present, then prepend country digits (no + sign)
     if (cleanPhone.startsWith('0')) {
       cleanPhone = cleanPhone.substring(1);
     }
 
-    const formatted = dialCode + cleanPhone;
-
+    const formatted = countryDigits + cleanPhone;
     this.logger.log(`📱 Phone formatting: ${phone} → ${formatted} (country: ${country})`);
     return formatted;
   }
@@ -783,16 +802,14 @@ export class NetwalletpayProvider implements PaymentProvider {
     const normalizedProvider = providerId?.toLowerCase() || '';
 
     if (normalizedProvider.includes('mtn')) {
-      return 'MTN';
+      return 'MOMO';
     } else if (normalizedProvider.includes('orange')) {
-      return 'ORANGE';
+      return 'ORANGE_MONEY';
     } else if (normalizedProvider.includes('eu')) {
       return 'EU';
-    } else if (normalizedProvider.includes('netwallet')) {
-      return 'NETWALLET';
     }
 
-    return 'MTN'; // Default fallback
+    return 'MOMO'; // Default fallback
   }
 
   private getMethodProviderCandidates(currentProvider: string): string[] {
@@ -820,7 +837,11 @@ export class NetwalletpayProvider implements PaymentProvider {
 
   private isRetryableError(error: unknown): boolean {
     const message = (error as Error)?.message?.toLowerCase?.() || '';
-    return message.includes('4008') || message.includes('unsubscribe') || message.includes('method type');
+    return message.includes('500') ||
+           message.includes('internal server') ||
+           message.includes('4008') ||
+           message.includes('unsubscribe') ||
+           message.includes('method type');
   }
 
   private async postWithMethodProviderFallback(endpoint: string, basePayload: any): Promise<any> {

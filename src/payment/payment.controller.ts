@@ -5,6 +5,7 @@ import {
   Get,
   Body,
   Req,
+  Param,
   UseGuards,
   Headers,
   Query,
@@ -13,6 +14,8 @@ import {
 import { PaymentService } from './payment.service.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
+import { OptionalJwtGuard } from '../auth/guards/optional-jwt.guard.js';
+import { Public } from '../auth/decorators/public.decorator.js';
 
 import {
   ApiTags,
@@ -32,8 +35,13 @@ export class PaymentController {
 
   // ============================
   // PROCESS PAYMENT (FLOW-BASED)
+  // Supports both authenticated users and guests.
+  // @Public()       → bypasses the global JwtAuthGuard
+  // OptionalJwtGuard → extracts userId if JWT present; sets req.user = null for guests
   // ============================
   @Post()
+  @Public()
+  @UseGuards(OptionalJwtGuard)
   @ApiOperation({
     summary: 'Process payment (DIRECT, QR, REQUEST)',
     description: `
@@ -289,7 +297,9 @@ export class PaymentController {
     if (idempotencyKey) {
       dto.idempotencyKey = idempotencyKey;
     }
-    return this.service.processPayment(req.user.userId, dto);
+    // req.user is null for guests; pass empty string so service knows it's a guest
+    const userId: string = (req.user as { userId: string } | null)?.userId ?? '';
+    return this.service.processPayment(userId, dto);
   }
 
   // ============================
@@ -333,5 +343,19 @@ export class PaymentController {
     @Query('country') country: string,
   ) {
     return this.service.verifyProviders(paymentType, method, country);
+  }
+
+  // ============================
+  // PUBLIC INVOICE LOOKUP (for /pay/[reference] page — no auth required)
+  // ============================
+  @Public()
+  @Get('invoice/:reference')
+  @ApiOperation({
+    summary: 'Get invoice by reference (public — used by pay page)',
+  })
+  @ApiResponse({ status: 200, description: 'Invoice details' })
+  @ApiResponse({ status: 404, description: 'Invoice not found' })
+  async getInvoice(@Param('reference') reference: string) {
+    return this.service.getInvoiceByReference(reference);
   }
 }

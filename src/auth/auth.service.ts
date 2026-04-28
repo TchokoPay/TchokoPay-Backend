@@ -29,32 +29,92 @@ export class AuthService {
     private otpService: OtpService,
   ) {}
 
+  private async storeRefreshToken(userId: string, refreshToken: string) {
+    const hashedRefreshToken = await bcrypt.hash(refreshToken, 10);
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { refreshToken: hashedRefreshToken },
+    });
+  }
+
+  private async getTokenIdentifier(userId: string, fallback: string) {
+    const primaryContact = await this.prisma.userContact.findFirst({
+      where: { userId, isPrimary: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return primaryContact?.value || fallback;
+  }
+
   // =====================================================
   // 🚀 SIGNUP (STRICT INDUSTRY STANDARD)
   // =====================================================
   async signup(dto: SignupDto) {
     const { email, phone, password, firstName, lastName } = dto;
 
-    // ✅ Must provide exactly ONE identifier
-    if ((email && phone) || (!email && !phone)) {
+    // ── Must provide exactly ONE identifier ───────────────────────────────────
+    if (email && phone) {
       throw new BadRequestException(
-        'Provide either email OR phone (not both)',
+        'Provide either an email address or a phone number — not both.',
+      );
+    }
+    if (!email && !phone) {
+      throw new BadRequestException(
+        'An email address or phone number is required.',
       );
     }
 
-    const identifier = email || phone;
     const type = email ? 'EMAIL' : 'PHONE';
 
-    this.logger.log(`Signup attempt: ${identifier}`);
+    // ── Server-side format guards (belt-and-suspenders on top of DTO) ─────────
+    if (email) {
+      // Reject anything that looks purely numeric (someone typed a phone into email field)
+      if (/^\+?\d+$/.test(email.trim())) {
+        throw new BadRequestException(
+          "That doesn't look like a valid email address. Did you mean to use your phone number?",
+        );
+      }
+      // Basic RFC structure: must contain @ and a domain
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim())) {
+        throw new BadRequestException(
+          'Please enter a valid email address (e.g. you@example.com).',
+        );
+      }
+    }
 
-    // 🚨 GLOBAL UNIQUENESS CHECK
+    if (phone) {
+      // Reject if contains letters or @ (someone typed email into phone field)
+      if (/[a-zA-Z@]/.test(phone)) {
+        throw new BadRequestException(
+          'Phone number must contain digits only — no letters or email addresses.',
+        );
+      }
+      // Must be E.164: +[1-9][6-14 digits]
+      if (!/^\+[1-9]\d{6,14}$/.test(phone)) {
+        throw new BadRequestException(
+          'Phone must be in international format (e.g. +237670000000).',
+        );
+      }
+    }
+
+    const identifier = (email || phone) as string;
+
+    this.logger.log(`Signup attempt [${type}]: ${identifier}`);
+
+    // ── Global uniqueness — across ALL users and ALL contact types ─────────────
     const existingContact = await this.prisma.userContact.findFirst({
       where: { value: identifier },
     });
 
     if (existingContact) {
+      if (type === 'EMAIL') {
+        throw new BadRequestException(
+          'An account with this email address already exists. Please sign in instead.',
+        );
+      }
       throw new BadRequestException(
-        'Email or phone already in use',
+        'This phone number is already registered to an account. Please sign in instead.',
       );
     }
 
@@ -107,7 +167,18 @@ export class AuthService {
     }
 
     if (contact.isVerified) {
-      return { message: 'Already verified' };
+      const tokens = await generateTokens(
+        this.jwtService,
+        contact.userId,
+        contact.value,
+      );
+
+      await this.storeRefreshToken(contact.userId, tokens.refreshToken);
+
+      return {
+        message: 'Account already verified',
+        ...tokens,
+      };
     }
 
     // 🔐 Validate OTP
@@ -127,6 +198,8 @@ export class AuthService {
       contact.userId,
       contact.value,
     );
+
+    await this.storeRefreshToken(contact.userId, tokens.refreshToken);
 
     return {
       message: 'Account verified successfully',
@@ -156,6 +229,13 @@ export class AuthService {
       );
     }
 
+    // Account was created via Google OAuth — no password set
+    if (!contact.user.password) {
+      throw new UnauthorizedException(
+        'This account uses Google sign-in. Please continue with Google.',
+      );
+    }
+
     const isMatch = await bcrypt.compare(
       password,
       contact.user.password,
@@ -170,16 +250,7 @@ export class AuthService {
       contact.user.id,
       identifier,
     );
-
-    const hashedRefreshToken = await bcrypt.hash(
-      tokens.refreshToken,
-      10,
-    );
-
-    await this.prisma.user.update({
-      where: { id: contact.user.id },
-      data: { refreshToken: hashedRefreshToken },
-    });
+    await this.storeRefreshToken(contact.user.id, tokens.refreshToken);
 
     return tokens;
   }
@@ -250,9 +321,26 @@ export class AuthService {
   async googleLogin(token: string) {
     const googleUser = await this.googleAuth.verifyGoogleToken(token);
 
-    let user = await this.prisma.user.findUnique({
-      where: { googleId: googleUser.googleId },
+    const email = googleUser.email.toLowerCase();
+
+    const existingContact = await this.prisma.userContact.findUnique({
+      where: { value: email },
+      include: { user: true },
     });
+
+    let user = existingContact?.user ?? null;
+
+    if (!user) {
+      user = await this.prisma.user.findUnique({
+        where: { googleId: googleUser.googleId },
+      });
+    }
+
+    if (user && user.googleId && user.googleId !== googleUser.googleId) {
+      throw new UnauthorizedException(
+        'This email is already linked to a different Google account.',
+      );
+    }
 
     if (!user) {
       user = await this.prisma.user.create({
@@ -260,25 +348,62 @@ export class AuthService {
           firstName: googleUser.firstName || 'Google',
           lastName: googleUser.lastName || 'User',
           googleId: googleUser.googleId,
+          profilePicture: googleUser.picture,
+          contacts: {
+            create: {
+              type: 'EMAIL',
+              value: email,
+              isPrimary: true,
+              isVerified: true,
+            },
+          },
         },
       });
+    } else {
+      user = await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          googleId: googleUser.googleId,
+          profilePicture: user.profilePicture || googleUser.picture,
+          firstName: user.firstName || googleUser.firstName || 'Google',
+          lastName: user.lastName || googleUser.lastName || 'User',
+        },
+      });
+
+      if (existingContact) {
+        if (!existingContact.isVerified || !existingContact.isPrimary) {
+          await this.prisma.userContact.update({
+            where: { id: existingContact.id },
+            data: {
+              isVerified: true,
+              isPrimary: true,
+            },
+          });
+        }
+      } else {
+        await this.prisma.userContact.updateMany({
+          where: { userId: user.id, type: 'EMAIL' },
+          data: { isPrimary: false },
+        });
+
+        await this.prisma.userContact.create({
+          data: {
+            userId: user.id,
+            type: 'EMAIL',
+            value: email,
+            isPrimary: true,
+            isVerified: true,
+          },
+        });
+      }
     }
 
     const tokens = await generateTokens(
       this.jwtService,
       user.id,
-      googleUser.email!,
+      email,
     );
-
-    const hashedRefreshToken = await bcrypt.hash(
-      tokens.refreshToken,
-      10,
-    );
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { refreshToken: hashedRefreshToken },
-    });
+    await this.storeRefreshToken(user.id, tokens.refreshToken);
 
     return {
       ...tokens,
@@ -311,21 +436,14 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
+    const identifier = await this.getTokenIdentifier(user.id, userId);
     const tokens = await generateTokens(
       this.jwtService,
       user.id,
-      userId,
+      identifier,
     );
 
-    const hashedRefreshToken = await bcrypt.hash(
-      tokens.refreshToken,
-      10,
-    );
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { refreshToken: hashedRefreshToken },
-    });
+    await this.storeRefreshToken(user.id, tokens.refreshToken);
 
     return tokens;
   }

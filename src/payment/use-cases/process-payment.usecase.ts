@@ -1,10 +1,5 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import {
-  Prisma,
-  TransactionStatus,
-  TransactionType,
-  LedgerEntryType,
-} from '@prisma/client';
+import { TransactionStatus } from '@prisma/client';
 import { QuoteService } from '../../quote/quote.service.js';
 import {
   CreateQuoteDto,
@@ -17,6 +12,7 @@ import { PaymentProviderFactory } from '../providers/payment-provider.factory.js
 import { FlowType, PaymentAction } from '../enums/payment.enums.js';
 import { PhoneResolutionService } from '../services/phone-resolution.service.js';
 import { PaymentEventService } from '../services/payment-event.service.js';
+import { PaymentPollingService, PollingProvider } from '../services/payment-polling.service.js';
 
 @Injectable()
 export class ProcessPaymentUseCase {
@@ -26,11 +22,13 @@ export class ProcessPaymentUseCase {
     private providerFactory: PaymentProviderFactory,
     private phoneResolution: PhoneResolutionService,
     private paymentEventService: PaymentEventService,
+    private pollingService: PaymentPollingService,
   ) {}
 
   async execute({ userId, dto }: { userId: string; dto: CreatePaymentDto }) {
     const endpoint = 'payments.process';
     const idempotencyKey = (dto.idempotencyKey || '').trim();
+    const isGuest = !userId || !userId.trim();
 
     console.log('\n' + '='.repeat(80));
     console.log('🚀 PAYMENT PROCESSING STARTED');
@@ -197,7 +195,7 @@ export class ProcessPaymentUseCase {
         recipient: recipient ? { connect: { id: recipient.id } } : undefined,
         recipientPhone,
         recipientName,
-        createdBy: { connect: { id: userId } },
+        createdBy: isGuest ? undefined : { connect: { id: userId } },
         expiresAt: quote.expiresAt,
       },
     });
@@ -271,183 +269,106 @@ export class ProcessPaymentUseCase {
         expiresAt: payinResponse?.expiresAt,
       });
 
-      // Store provider response and external reference
+      // If payin failed, mark attempt + invoice as FAILED and stop — do not proceed to payout
+      if (payinResponse?.status === 'FAILED') {
+        console.error('❌ PAYIN failed — aborting payout:', payinResponse?.error);
+        await this.prisma.paymentAttempt.update({
+          where: { id: attempt.id },
+          data: {
+            status: TransactionStatus.FAILED,
+            failureReason: payinResponse?.error || 'Provider returned FAILED',
+            providerResponse: payinResponse,
+          },
+        });
+        await this.prisma.paymentInvoice.update({
+          where: { id: invoice.id },
+          data: { status: TransactionStatus.FAILED },
+        });
+        return {
+          message: 'Payment failed',
+          invoice: { ...invoice, status: TransactionStatus.FAILED },
+          quote,
+          payment: { status: 'FAILED', error: payinResponse?.error },
+        };
+      }
+
+      // Payin request accepted — mark PROCESSING and wait for webhook confirmation
+      // Payout will only fire after the provider confirms the payer has actually paid
+      const externalRef = payinResponse?.transactionId
+        || payinResponse?.id
+        || payinResponse?.invoiceId
+        || null;
+
       await this.prisma.paymentAttempt.update({
         where: { id: attempt.id },
         data: {
-          status: TransactionStatus.SUCCESS,
-          externalRef: payinResponse?.id || payinResponse?.invoiceId, // Store invoice ID
-          providerResponse: payinResponse, // Store full response for Lightning/Crypto details
+          status: TransactionStatus.PROCESSING,
+          externalRef,
+          providerResponse: payinResponse,
         },
       });
 
       await this.prisma.paymentInvoice.update({
         where: { id: invoice.id },
-        data: { status: TransactionStatus.SUCCESS },
+        data: { status: TransactionStatus.PROCESSING },
       });
 
-      console.log('💸 Processing PAYOUT with:', invoice.payoutMethod);
-      const payoutProvider = this.providerFactory.getProvider(
-        invoice.payoutMethod,
-        invoice.country,
-      );
+      console.log('⏳ Payin request sent — awaiting confirmation via webhook or polling', {
+        reference: invoice.reference,
+        externalRef,
+      });
 
-      const payoutRequiresPhone = ['MOMO', 'ORANGE', 'CARD', 'BANK'].includes(
-        invoice.payoutMethod?.toUpperCase(),
-      );
-
-      if (payoutRequiresPhone) {
-        if (!recipientPhone) {
-          console.error('❌ Recipient phone required for payout');
-          throw new BadRequestException('Recipient phone required for payout method');
-        }
-
-        console.log('📱 Sending payout to:', recipientPhone, 'via', invoice.payoutMethod);
-        payoutResponse = await payoutProvider.payout({
-          amount: Number(quote.targetAmount),
-          currency: quote.targetCurrency.code,
-          phone: recipientPhone,
-          reference: invoice.reference,
-          metadata: {
-            country: invoice.country,
-            method: invoice.payoutMethod,
-            type: 'PAYOUT',
-          },
+      // Start sequential polling as a fallback alongside the webhook.
+      // Works even when NETWALLETPAY_WEBHOOK_BASE_URL is localhost (not reachable externally).
+      // PayoutExecutorService is idempotent, so both paths can fire safely.
+      if (externalRef) {
+        const pollingProvider = this.resolvePollingProvider(paymentMethod);
+        this.pollingService.start({
+          invoiceId: invoice.id,
+          attemptId: attempt.id,
+          externalRef,
+          provider: pollingProvider,
+          // Blink polling requires the BOLT11 payment request, not just the hash
+          blinkPaymentRequest: pollingProvider === 'blink'
+            ? (payinResponse?.paymentRequest ?? undefined)
+            : undefined,
         });
-      } else {
-        payoutResponse = await payoutProvider.payout({
-          amount: Number(quote.targetAmount),
-          currency: quote.targetCurrency.code,
-          phone: undefined,
-          reference: invoice.reference,
-          metadata: {
-            country: invoice.country,
-            method: invoice.payoutMethod,
-            type: 'PAYOUT',
-          },
-        });
-      }
-
-      console.log('✅ PAYOUT completed:', {
-        status: payoutResponse?.status,
-        reference: payoutResponse?.reference,
-        transactionId: payoutResponse?.transactionId || payoutResponse?.id,
-      });
-
-      // Record transaction and ledger entries for a successful flow
-      const payerWallet = await this.getOrCreateWallet(userId, quote.baseCurrencyId);
-      const recipientWallet = recipient
-        ? await this.getOrCreateWallet(recipient.id, quote.targetCurrencyId)
-        : null;
-
-      const baseAmountDecimal = new Prisma.Decimal(quote.baseAmount);
-      const feeDecimal = quote.fee ? new Prisma.Decimal(quote.fee) : new Prisma.Decimal(0);
-      const exchangeRateDecimal = quote.exchangeRate ? new Prisma.Decimal(quote.exchangeRate) : new Prisma.Decimal(1);
-
-      const transaction = await this.prisma.transaction.create({
-        data: {
-          type: TransactionType.PAYMENT,
-          status: TransactionStatus.SUCCESS,
-          quote: { connect: { id: quote.id } },
-          amount: baseAmountDecimal,
-          currency: { connect: { id: quote.baseCurrencyId } },
-          exchangeRate: exchangeRateDecimal,
-          fee: feeDecimal,
-          netAmount: baseAmountDecimal.sub(feeDecimal),
-          baseCurrencyId: quote.baseCurrencyId,
-          targetCurrencyId: quote.targetCurrencyId,
-          baseAmount: baseAmountDecimal,
-          targetAmount: new Prisma.Decimal(quote.targetAmount),
-          rateSource: quote.rateSource,
-          reference: invoice.reference,
-          idempotencyKey: idempotencyKey || undefined,
-          senderId: userId,
-          receiverId: recipient?.id ?? null,
-          wallet: { connect: { id: payerWallet.id } },
-          user: { connect: { id: userId } },
-        },
-      });
-
-      await this.createLedgerEntry(
-        payerWallet,
-        transaction,
-        invoice,
-        quote.baseAmount,
-        LedgerEntryType.DEBIT,
-      );
-
-      if (recipientWallet) {
-        await this.createLedgerEntry(
-          recipientWallet,
-          transaction,
-          invoice,
-          quote.targetAmount,
-          LedgerEntryType.CREDIT,
-        );
       }
     }
 
     const result: any = {
-      message: 'Process completed',
+      message: 'Payment initiated — awaiting confirmation',
       invoice,
       quote,
     };
 
-    // Include Lightning/Crypto provider details if available
     if (payinResponse) {
       result.payment = {
-        status: payinResponse.status,
-        invoiceId: payinResponse.id || payinResponse.invoiceId,
-        paymentRequest: payinResponse.paymentRequest, // Lightning QR/invoice string
-        amount: payinResponse.amount,
-        currency: payinResponse.currency,
-        expiresAt: payinResponse.expiresAt, // When invoice expires
-        address: payinResponse.address, // For on-chain Bitcoin
-        reference: payinResponse.reference,
+        status: payinResponse.status ?? 'PROCESSING',
+        externalRef: payinResponse.transactionId || payinResponse.id || payinResponse.invoiceId,
+        // Returned for Lightning so frontend can show QR code
+        paymentRequest: payinResponse.paymentRequest ?? null,
+        amount: payinResponse.amount ?? null,
+        currency: payinResponse.currency ?? null,
+        expiresAt: payinResponse.expiresAt ?? null,
+        address: payinResponse.address ?? null,
+        reference: payinResponse.reference ?? null,
       };
     }
 
-    // Include payout provider details if available
-    if (payoutResponse) {
-      result.payout = {
-        status: payoutResponse.status,
-        transactionId: payoutResponse.transactionId || payoutResponse.id,
-        reference: payoutResponse.reference,
-        provider: invoice.payoutMethod,
-      };
-    }
-
-    // ============================
-    // EMIT PAYMENT COMPLETE EVENT FOR WEBSOCKET
-    // ============================
     if (shouldProcessPayment) {
-      console.log('📡 Emitting payment.complete event for real-time notifications');
       await this.paymentEventService.emitPaymentComplete({
         invoiceId: invoice.id,
         invoiceReference: invoice.reference,
-        status: 'SUCCESS',
+        status: 'PENDING',
+        stage: 'AWAITING_PAYER',
         paymentMethod: invoice.paymentMethod,
         payoutMethod: invoice.payoutMethod,
         amount: Number(quote.baseAmount),
         currency: quote.baseCurrency.code,
         paymentDetails: result.payment,
-        payoutDetails: result.payout,
         timestamp: new Date(),
-        userId,
-      });
-
-      // Notify user via WebSocket
-      await this.paymentEventService.notifyUser(userId, {
-        invoiceId: invoice.id,
-        invoiceReference: invoice.reference,
-        status: 'SUCCESS',
-        paymentMethod: invoice.paymentMethod,
-        payoutMethod: invoice.payoutMethod,
-        amount: Number(quote.baseAmount),
-        currency: quote.baseCurrency.code,
-        paymentDetails: result.payment,
-        payoutDetails: result.payout,
-        timestamp: new Date(),
+        userId: isGuest ? undefined : userId,
       });
     }
 
@@ -483,35 +404,6 @@ export class ProcessPaymentUseCase {
         response,
       },
     });
-  }
-
-  private async getOrCreateWallet(userId: string, currencyId: string) {
-    // Validate currency exists
-    const currency = await this.prisma.currency.findUnique({
-      where: { id: currencyId },
-    });
-
-    if (!currency) {
-      throw new BadRequestException(`Currency not found: ${currencyId}`);
-    }
-
-    let wallet = await this.prisma.wallet.findFirst({
-      where: { userId, currencyId },
-    });
-
-    if (!wallet) {
-      wallet = await this.prisma.wallet.create({
-        data: {
-          user: { connect: { id: userId } },
-          currency: { connect: { id: currencyId } },
-          totalProcessed: new Prisma.Decimal(0),
-          totalVolume: new Prisma.Decimal(0),
-          totalFeesEarned: new Prisma.Decimal(0),
-        },
-      });
-    }
-
-    return wallet;
   }
 
   private validatePaymentFlow(dto: CreatePaymentDto) {
@@ -683,30 +575,10 @@ export class ProcessPaymentUseCase {
     };
   }
 
-  private async createLedgerEntry(
-    wallet: any,
-    transaction: any,
-    invoice: any,
-    amount: Prisma.Decimal,
-    type: 'CREDIT' | 'DEBIT',
-  ) {
-    const newTotals = await this.prisma.wallet.update({
-      where: { id: wallet.id },
-      data: {
-        totalProcessed: { increment: amount },
-        totalVolume: { increment: amount },
-      },
-    });
-
-    await this.prisma.ledger.create({
-      data: {
-        wallet: { connect: { id: wallet.id } },
-        transaction: { connect: { id: transaction.id } },
-        invoice: { connect: { id: invoice.id } },
-        amount,
-        type,
-        balanceAfter: newTotals.totalProcessed,
-      },
-    });
+  /** Map the payment method to the correct polling provider. */
+  private resolvePollingProvider(paymentMethod: string): PollingProvider {
+    const m = paymentMethod.toUpperCase();
+    if (m === 'LIGHTNING' || m === 'BTC') return 'blink';
+    return 'netwalletpay'; // MOMO, ORANGE, CARD, BANK all go through Netwalletpay
   }
 }
