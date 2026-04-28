@@ -14,6 +14,10 @@ import { PricingService } from '../pricing/pricing.service.js';
 @Injectable()
 export class QuoteService {
   private readonly logger = new Logger(QuoteService.name);
+  private readonly cryptoRateCache = new Map<
+    string,
+    { rate: number; source: string; fetchedAt: number }
+  >();
 
   constructor(
     private prisma: PrismaService,
@@ -297,28 +301,136 @@ export class QuoteService {
     const map: Record<string, string> = {
       BTC: 'bitcoin',
       ETH: 'ethereum',
-      SAT: 'bitcoin',  // SAT is denominated in satoshis (100M sats = 1 BTC)
+      SAT: 'bitcoin', // SAT is denominated in satoshis (100M sats = 1 BTC)
     };
 
     const coinId = map[base];
 
     if (!coinId) throw new BadRequestException('Unsupported crypto');
 
-    const url = `${process.env.COINGECKO_BASE_URL}/simple/price?ids=${coinId}&vs_currencies=usd`;
+    const normalizedBase = base.toUpperCase();
+    const providers = [
+      () => this.fetchCoinGeckoUsdRate(coinId),
+      () => this.fetchCoinbaseUsdRate(normalizedBase === 'SAT' ? 'BTC' : normalizedBase),
+    ];
+    const failures: string[] = [];
+    let rate: number | null = null;
+    let source = '';
 
-    const res = await fetch(url);
-    const data = await res.json();
+    for (const provider of providers) {
+      try {
+        const result = await provider();
+        if (result.rate > 0 && Number.isFinite(result.rate)) {
+          rate = result.rate;
+          source = result.source;
+          break;
+        }
+      } catch (error) {
+        failures.push((error as Error).message);
+      }
+    }
 
-    let rate = data?.[coinId]?.usd;
+    if (!rate) {
+      const cachedRate = this.getCachedCryptoRate(normalizedBase);
+      if (cachedRate) {
+        this.logger.warn(
+          `Using cached ${normalizedBase}/USD rate from ${cachedRate.source} after provider failure: ${failures.join(' | ')}`,
+        );
+        rate = cachedRate.rate;
+        source = `${cachedRate.source}-cache`;
+      }
+    }
 
-    if (!rate) throw new BadRequestException('Crypto rate failed');
+    if (!rate) {
+      this.logger.error(
+        `Crypto rate lookup failed for ${normalizedBase}: ${failures.join(' | ') || 'no provider returned a rate'}`,
+      );
+      throw new BadRequestException(
+        'Crypto rate unavailable right now. Please try again in a moment.',
+      );
+    }
 
     // SAT is 1/100,000,000 of BTC, so adjust the rate accordingly
-    if (base === 'SAT') {
+    if (normalizedBase === 'SAT') {
       rate = rate / 100_000_000;
     }
 
+    this.cacheCryptoRate(normalizedBase, rate, source);
     return rate;
+  }
+
+  private async fetchCoinGeckoUsdRate(coinId: string): Promise<{
+    rate: number;
+    source: string;
+  }> {
+    const url = `${process.env.COINGECKO_BASE_URL}/simple/price?ids=${coinId}&vs_currencies=usd`;
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!res.ok) {
+      throw new Error(`CoinGecko responded with HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const rate = Number(data?.[coinId]?.usd);
+
+    if (!rate || !Number.isFinite(rate)) {
+      throw new Error('CoinGecko returned no USD rate');
+    }
+
+    return { rate, source: 'coingecko' };
+  }
+
+  private async fetchCoinbaseUsdRate(symbol: string): Promise<{
+    rate: number;
+    source: string;
+  }> {
+    if (!['BTC', 'ETH'].includes(symbol)) {
+      throw new Error(`Coinbase fallback unavailable for ${symbol}`);
+    }
+
+    const url = `https://api.coinbase.com/v2/prices/${symbol}-USD/spot`;
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!res.ok) {
+      throw new Error(`Coinbase responded with HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const rate = Number(data?.data?.amount);
+
+    if (!rate || !Number.isFinite(rate)) {
+      throw new Error('Coinbase returned no USD rate');
+    }
+
+    return { rate, source: 'coinbase' };
+  }
+
+  private cacheCryptoRate(symbol: string, rate: number, source: string) {
+    this.cryptoRateCache.set(symbol, {
+      rate,
+      source,
+      fetchedAt: Date.now(),
+    });
+  }
+
+  private getCachedCryptoRate(symbol: string) {
+    const cachedRate = this.cryptoRateCache.get(symbol);
+
+    if (!cachedRate) {
+      return null;
+    }
+
+    const maxAgeMs = 15 * 60 * 1000;
+    if (Date.now() - cachedRate.fetchedAt > maxAgeMs) {
+      this.cryptoRateCache.delete(symbol);
+      return null;
+    }
+
+    return cachedRate;
   }
 
   private async getFiatRate(base: string, target: string) {

@@ -99,7 +99,13 @@ export class PayoutExecutorService {
       });
 
       if (response?.status === 'FAILED') {
-        await this.markPayoutFailed(payout.id, payoutAttempt.id, response.error);
+        await this.markPayoutFailed(
+          invoice,
+          quote,
+          payout.id,
+          payoutAttempt.id,
+          response.error,
+        );
         this.logger.error(`Payout FAILED for invoice ${invoice.reference}: ${response.error}`);
         return null;
       }
@@ -148,7 +154,13 @@ export class PayoutExecutorService {
       return { payoutId: payout.id, payoutAttemptId: payoutAttempt.id, payoutExternalRef };
     } catch (error) {
       this.logger.error(`Payout exception for invoice ${invoiceId}:`, error);
-      await this.markPayoutFailed(payout.id, payoutAttempt.id, (error as Error).message);
+      await this.markPayoutFailed(
+        invoice,
+        quote,
+        payout.id,
+        payoutAttempt.id,
+        (error as Error).message,
+      );
       return null;
     }
   }
@@ -292,7 +304,22 @@ export class PayoutExecutorService {
     this.logger.warn(`Payout failed: ${externalRef}${reason ? ` | ${reason}` : ''}`);
   }
 
-  private async markPayoutFailed(payoutId: string, attemptId: string, reason?: string) {
+  private async markPayoutFailed(
+    invoice: {
+      id: string;
+      reference: string;
+      paymentMethod: string;
+      payoutMethod: string;
+      createdById: string | null;
+    },
+    quote: {
+      baseAmount: Prisma.Decimal;
+      baseCurrency: { code: string };
+    },
+    payoutId: string,
+    attemptId: string,
+    reason?: string,
+  ) {
     await this.prisma.payoutAttempt.update({
       where: { id: attemptId },
       data: { status: TransactionStatus.FAILED },
@@ -300,6 +327,30 @@ export class PayoutExecutorService {
     await this.prisma.payout.update({
       where: { id: payoutId },
       data: { status: TransactionStatus.FAILED },
+    });
+
+    await this.prisma.paymentInvoice.update({
+      where: { id: invoice.id },
+      data: { status: TransactionStatus.FAILED },
+    });
+
+    await this.updateRequestStatusForInvoice(invoice.id, TransactionStatus.FAILED);
+
+    this.paymentEventService.emitPaymentComplete({
+      invoiceId: invoice.id,
+      invoiceReference: invoice.reference,
+      status: 'FAILED',
+      stage: 'FAILED',
+      paymentMethod: invoice.paymentMethod,
+      payoutMethod: invoice.payoutMethod,
+      amount: Number(quote.baseAmount),
+      currency: quote.baseCurrency.code,
+      payoutDetails: {
+        status: 'FAILED',
+        reference: reason,
+      },
+      timestamp: new Date(),
+      userId: invoice.createdById ?? undefined,
     });
   }
 
