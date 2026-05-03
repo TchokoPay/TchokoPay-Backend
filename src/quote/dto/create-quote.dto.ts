@@ -17,6 +17,9 @@ export enum PaymentMethodEnum {
   MOMO = 'MOMO',
   ORANGE = 'ORANGE',
   BTC = 'BTC',
+  LIGHTNING = 'LIGHTNING',
+  CARD = 'CARD',
+  BANK = 'BANK',
 }
 
 export enum FlowEnum {

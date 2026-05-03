@@ -17,6 +17,7 @@ import {
 import { QuoteService } from './quote.service.js';
 import { CreateQuoteDto } from './dto/create-quote.dto.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
+import { Public } from '../auth/decorators/public.decorator.js';
 
 @ApiTags('Quote')
 @Controller('quotes')
@@ -33,6 +34,14 @@ export class QuoteController {
   @Post()
   create(@Body() dto: CreateQuoteDto) {
     return this.quoteService.create(dto);
+  }
+
+  @Public()
+  @ApiOperation({ summary: 'Preview a quote without saving it' })
+  @ApiResponse({ status: 201 })
+  @Post('preview')
+  preview(@Body() dto: CreateQuoteDto) {
+    return this.quoteService.preview(dto);
   }
 
   // ============================

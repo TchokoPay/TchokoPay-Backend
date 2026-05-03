@@ -160,6 +160,13 @@ export class QuoteService {
       throw new BadRequestException('Invalid amountType');
     }
 
+    const rawBaseAmount = baseAmount;
+    const rawTargetAmount = targetAmount;
+    const rawFeeAmount = feeAmount;
+
+    baseAmount = this.roundAmountForCurrency(baseAmount, baseCurrency.decimals, baseCurrency.isCrypto);
+    feeAmount = this.roundAmountForCurrency(feeAmount, baseCurrency.decimals, baseCurrency.isCrypto);
+
     // ============================
     // EXPIRY
     // ============================
@@ -176,6 +183,15 @@ export class QuoteService {
     console.log(`  ExchangeRate: ${adjustedRate}`);
     console.log(`  FeePercent: ${feePercent}%`);
     console.log(`  ---`);
+    console.log(
+      `  Original Base Amount: ${rawBaseAmount} ${baseCurrency.code} → Rounded Up: ${baseAmount} ${baseCurrency.code}`,
+    );
+    console.log(
+      `  Original Target Amount: ${rawTargetAmount} ${targetCurrency.code} → Preserved: ${targetAmount} ${targetCurrency.code}`,
+    );
+    console.log(
+      `  Original Fee Amount: ${rawFeeAmount} ${baseCurrency.code} → Rounded Up: ${feeAmount} ${baseCurrency.code}`,
+    );
     console.log(
       `  Payer (Base) Amount: ${baseAmount} ${baseCurrency.code} (includes fee)`,
     );
@@ -224,6 +240,147 @@ export class QuoteService {
     });
 
     return quote;
+  }
+
+  async preview(dto: CreateQuoteDto) {
+    this.logger.log(
+      `Previewing quote: ${dto.baseCurrency} â†’ ${dto.targetCurrency}`,
+    );
+
+    console.log('ðŸ” Quote preview request received:', dto);
+
+    if (!dto.paymentMethod || !dto.payoutMethod) {
+      throw new BadRequestException(
+        'paymentMethod and payoutMethod are required',
+      );
+    }
+
+    if (!dto.amountType) {
+      throw new BadRequestException('amountType is required (PAY or RECEIVE)');
+    }
+
+    const baseCurrency = await this.prisma.currency.findUnique({
+      where: { code: dto.baseCurrency.toUpperCase() },
+    });
+
+    const targetCurrency = await this.prisma.currency.findUnique({
+      where: { code: dto.targetCurrency.toUpperCase() },
+    });
+
+    if (!baseCurrency || !targetCurrency) {
+      throw new NotFoundException('Invalid currency');
+    }
+
+    let pricing;
+
+    try {
+      pricing = await this.pricingService.getPricing({
+        baseCurrency: baseCurrency.code,
+        targetCurrency: targetCurrency.code,
+        paymentMethod: dto.paymentMethod,
+        payoutMethod: dto.payoutMethod,
+        flow: dto.flow,
+      });
+    } catch (err) {
+      console.log(
+        `âš ï¸ No pricing match found for ${baseCurrency.code}â†’${targetCurrency.code} | ${dto.paymentMethod}â†’${dto.payoutMethod} â†’ using fallback`,
+      );
+      pricing = { feePercent: 1.5, spreadPercent: 1.0 };
+    }
+
+    const feePercent = Number(pricing.feePercent ?? 1.5);
+    const spreadPercent = Number(pricing.spreadPercent ?? 1.0);
+    const isSameCurrency = baseCurrency.code === targetCurrency.code;
+
+    let rate: number;
+    let adjustedRate: number;
+
+    if (isSameCurrency) {
+      rate = 1.0;
+      adjustedRate = 1.0;
+    } else {
+      rate = await this.getSmartExchangeRate(
+        baseCurrency.code,
+        targetCurrency.code,
+      );
+
+      if (!rate || isNaN(rate)) {
+        throw new BadRequestException('Invalid exchange rate');
+      }
+
+      adjustedRate = rate * (1 - spreadPercent / 100);
+    }
+
+    const inputAmount = Number(dto.amount);
+
+    let baseAmount: number;
+    let targetAmount: number;
+    let feeAmount: number;
+
+    if (dto.amountType === 'PAY') {
+      const netBase = inputAmount;
+      feeAmount = netBase * (feePercent / 100);
+      baseAmount = netBase + feeAmount;
+      targetAmount = netBase * adjustedRate;
+    } else if (dto.amountType === 'RECEIVE') {
+      targetAmount = inputAmount;
+
+      if (isSameCurrency) {
+        feeAmount = targetAmount * (feePercent / 100);
+        baseAmount = targetAmount + feeAmount;
+      } else {
+        const netBase = targetAmount / adjustedRate;
+        feeAmount = netBase * (feePercent / 100);
+        baseAmount = netBase + feeAmount;
+      }
+    } else {
+      throw new BadRequestException('Invalid amountType');
+    }
+
+    const rawBaseAmount = baseAmount;
+    const rawTargetAmount = targetAmount;
+    const rawFeeAmount = feeAmount;
+
+    baseAmount = this.roundAmountForCurrency(baseAmount, baseCurrency.decimals, baseCurrency.isCrypto);
+    feeAmount = this.roundAmountForCurrency(feeAmount, baseCurrency.decimals, baseCurrency.isCrypto);
+
+    console.log('🔍 QUOTE PREVIEW SUMMARY:');
+    console.log(`  Currency: ${baseCurrency.code} → ${targetCurrency.code}`);
+    console.log(`  Flow: ${dto.flow}`);
+    console.log(`  AmountType: ${dto.amountType}`);
+    console.log(`  ExchangeRate: ${adjustedRate}`);
+    console.log(`  FeePercent: ${feePercent}%`);
+    console.log(
+      `  Original Base Amount: ${rawBaseAmount} ${baseCurrency.code} → Rounded Up: ${baseAmount} ${baseCurrency.code}`,
+    );
+    console.log(
+      `  Original Target Amount: ${rawTargetAmount} ${targetCurrency.code} → Preserved: ${targetAmount} ${targetCurrency.code}`,
+    );
+    console.log(
+      `  Original Fee Amount: ${rawFeeAmount} ${baseCurrency.code} → Rounded Up: ${feeAmount} ${baseCurrency.code}`,
+    );
+
+    return {
+      baseAmount,
+      targetAmount,
+      exchangeRate: adjustedRate,
+      fee: feeAmount,
+      feePercent,
+      spreadPercent,
+      amountType: dto.amountType,
+      paymentMethod: dto.paymentMethod,
+      payoutMethod: dto.payoutMethod,
+      flow: dto.flow ?? 'DIRECT',
+      baseCurrency: {
+        code: baseCurrency.code,
+        symbol: baseCurrency.symbol,
+      },
+      targetCurrency: {
+        code: targetCurrency.code,
+        symbol: targetCurrency.symbol,
+      },
+      expiresAt: new Date(Date.now() + 60 * 1000),
+    };
   }
 
   // ============================
@@ -452,5 +609,18 @@ export class QuoteService {
 
   private isCrypto(currency: string) {
     return ['BTC', 'ETH', 'SAT'].includes(currency);
+  }
+
+  private roundAmountForCurrency(
+    amount: number,
+    decimals: number,
+    isCrypto: boolean,
+  ) {
+    if (isCrypto) {
+      return amount;
+    }
+
+    const factor = 10 ** decimals;
+    return Math.ceil((amount - Number.EPSILON) * factor) / factor;
   }
 }
