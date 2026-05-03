@@ -257,6 +257,33 @@ model Country {
   updatedAt DateTime @updatedAt
 }
 
+/**
+ * Registry of all payment aggregators integrated with TchokoPay.
+ * Adding a new aggregator (Stripe, Flutterwave, Paystack, …) starts here.
+ * Every PaymentProvider record is owned by exactly one aggregator so queries
+ * never cross aggregator boundaries.
+ */
+model PaymentAggregator {
+  id        String   @id @default(uuid())
+  /// Short lowercase identifier used in code — never changes once set.
+  /// Examples: 'netwalletpay', 'blink', 'stripe', 'flutterwave'
+  code      String   @unique
+  name      String
+  isActive  Boolean  @default(true)
+
+  providers PaymentProvider[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([code])
+}
+
+/**
+ * Generic payment method categories — shared vocabulary across all aggregators.
+ * Not aggregator-specific; MOBILE_MONEY means the same thing for Netwalletpay
+ * and Flutterwave even though the underlying providers differ.
+ */
 model PaymentMethodRef {
   id       String  @id @default(uuid())
   code     String  @unique
@@ -266,19 +293,31 @@ model PaymentMethodRef {
   providers PaymentProvider[]
 }
 
+/**
+ * A concrete provider offered by a specific aggregator in a specific country.
+ * Examples: mtn_cm (Netwalletpay, CM), mpesa_ke (Netwalletpay, KE).
+ * When Stripe is added, its card processors will live here with aggregatorId = stripe.
+ */
 model PaymentProvider {
-  id            String           @id @default(uuid())
-  providerCode  String           @unique
-  name          String
-  countryId     String
-  country       Country          @relation(fields: [countryId], references: [id])
-  methodId      String
-  method        PaymentMethodRef @relation(fields: [methodId], references: [id])
-  requiresType  Boolean          @default(false)
-  isActive      Boolean          @default(true)
+  id           String            @id @default(uuid())
+  providerCode String            @unique
+  name         String
+  /// Which aggregator owns this provider record.
+  /// Nullable only during migration — all records should have a value in production.
+  aggregatorId String?
+  aggregator   PaymentAggregator? @relation(fields: [aggregatorId], references: [id])
+  countryId    String
+  country      Country           @relation(fields: [countryId], references: [id])
+  methodId     String
+  method       PaymentMethodRef  @relation(fields: [methodId], references: [id])
+  requiresType Boolean           @default(false)
+  isActive     Boolean           @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([aggregatorId])
+  @@index([countryId])
 }
 
 /**

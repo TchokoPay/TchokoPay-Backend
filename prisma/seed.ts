@@ -8,6 +8,16 @@ if (!connectionString) throw new Error('DIRECT_URL environment variable is not s
 const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
 
+/**
+ * Registered payment aggregators.
+ * Add a new row here when integrating a new aggregator (Stripe, Flutterwave, …).
+ * The `code` is the immutable identifier used throughout the codebase.
+ */
+const aggregators = [
+  { code: 'netwalletpay', name: 'Netwalletpay' },
+  { code: 'blink',        name: 'Blink (Lightning)' },
+];
+
 // All countries supported by Netwalletpay (source: GET /api/v1/lookup/get-support-country)
 const countries = [
   { iso2: 'CM', name: 'Cameroon', currency: 'XAF', dialCode: '+237' },
@@ -89,53 +99,93 @@ const providers = [
 ];
 
 async function main() {
-  console.log('🌱 Seeding Netwalletpay lookup tables...');
+  console.log('🌱 Seeding aggregators, countries, methods, and providers...');
 
-  // 1. Upsert currencies + countries in parallel
+  // 0. Upsert aggregators — must exist before providers reference them
+  const aggregatorRecords = await Promise.all(
+    aggregators.map(({ code, name }) =>
+      prisma.paymentAggregator.upsert({
+        where: { code },
+        create: { code, name },
+        update: { name, isActive: true },
+      }),
+    ),
+  );
+  const aggregatorMap = Object.fromEntries(
+    aggregatorRecords.map((a) => [a.code, a.id]),
+  );
+  const netwalletpayId = aggregatorMap['netwalletpay'];
+  console.log(`  ✔ ${aggregators.length} aggregators upserted`);
+
+  // 1. Upsert currencies + countries
   await Promise.all(
     countries.map(async ({ iso2, name, currency, dialCode }) => {
       const cur = await prisma.currency.upsert({
-        where:  { code: currency },
-        create: { code: currency, name: currency, symbol: currency, decimals: 2, isCrypto: false },
+        where: { code: currency },
+        create: {
+          code: currency,
+          name: currency,
+          symbol: currency,
+          decimals: 2,
+          isCrypto: false,
+        },
         update: { name: currency },
       });
       await prisma.country.upsert({
-        where:  { iso2 },
+        where: { iso2 },
         create: { iso2, name, dialCode, currency: { connect: { id: cur.id } } },
         update: { name, dialCode, isActive: true, currencyId: cur.id },
       });
     }),
   );
+  console.log(`  ✔ ${countries.length} countries upserted`);
 
-  // 2. Upsert payment methods
+  // 2. Upsert generic payment method categories (shared across all aggregators)
   await Promise.all(
-    methods.map(m =>
+    methods.map((m) =>
       prisma.paymentMethodRef.upsert({
-        where:  { code: m.code },
+        where: { code: m.code },
         create: m,
         update: { name: m.name, isActive: true },
       }),
     ),
   );
+  console.log(`  ✔ ${methods.length} payment methods upserted`);
 
-  // 3. Upsert providers
+  // 3. Upsert Netwalletpay providers — all linked to the netwalletpay aggregator
   await Promise.all(
     providers.map(async ({ providerCode, name, country, method, requiresType }) => {
       const countryRec = await prisma.country.findUnique({ where: { iso2: country } });
-      const methodRec  = await prisma.paymentMethodRef.findUnique({ where: { code: method } });
+      const methodRec = await prisma.paymentMethodRef.findUnique({
+        where: { code: method },
+      });
       if (!countryRec || !methodRec) {
-        console.warn(`⚠️  Skipping provider ${providerCode}: country/method not found`);
+        console.warn(`  ⚠  Skipping ${providerCode}: country/method not found`);
         return;
       }
       await prisma.paymentProvider.upsert({
-        where:  { providerCode },
-        create: { providerCode, name, countryId: countryRec.id, methodId: methodRec.id, requiresType },
-        update: { name, countryId: countryRec.id, methodId: methodRec.id, requiresType, isActive: true },
+        where: { providerCode },
+        create: {
+          providerCode,
+          name,
+          aggregatorId: netwalletpayId,
+          countryId: countryRec.id,
+          methodId: methodRec.id,
+          requiresType,
+        },
+        update: {
+          name,
+          aggregatorId: netwalletpayId,
+          countryId: countryRec.id,
+          methodId: methodRec.id,
+          requiresType,
+          isActive: true,
+        },
       });
     }),
   );
-
-  console.log(`✅ Seeded ${countries.length} countries, ${methods.length} methods, ${providers.length} providers`);
+  console.log(`  ✔ ${providers.length} Netwalletpay providers upserted`);
+  console.log('\n✅ Seed complete.');
 }
 
 main()

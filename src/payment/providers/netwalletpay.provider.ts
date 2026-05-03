@@ -103,9 +103,15 @@ export class NetwalletpayProvider implements PaymentProvider {
         this.countryDialCodeMap[countryCode] = country.dialCode || '';
       }
       
-      // Load all active providers with their supported methods
+      // Load only Netwalletpay's providers — aggregator filter prevents future
+      // Stripe/Flutterwave records from being treated as supported by this provider
       const providers = await this.prisma.paymentProvider.findMany({
-        where: { isActive: true, country: { isActive: true }, method: { isActive: true } },
+        where: {
+          aggregator: { code: 'netwalletpay', isActive: true },
+          isActive: true,
+          country: { isActive: true },
+          method: { isActive: true },
+        },
         include: { country: true, method: true },
       });
 
@@ -562,6 +568,7 @@ export class NetwalletpayProvider implements PaymentProvider {
       // Order by providerCode to ensure MTN (mtn_cm) is preferred when multiple providers exist
       const allProviders = await this.prisma.paymentProvider.findMany({
         where: {
+          aggregator: { code: 'netwalletpay', isActive: true },
           country: { iso2: country, isActive: true },
           method: { code: method, isActive: true },
           isActive: true,
@@ -642,6 +649,8 @@ export class NetwalletpayProvider implements PaymentProvider {
 
     const providers = await this.prisma.paymentProvider.findMany({
       where: {
+        // Scope strictly to Netwalletpay — prevents future aggregator records leaking in
+        aggregator: { code: 'netwalletpay', isActive: true },
         country: { iso2: country, isActive: true },
         method: { code: mappedMethod, isActive: true },
         isActive: true,
