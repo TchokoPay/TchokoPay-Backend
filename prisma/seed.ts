@@ -10,16 +10,18 @@ const prisma = new PrismaClient({ adapter });
 
 // All countries supported by Netwalletpay (source: GET /api/v1/lookup/get-support-country)
 const countries = [
-  { iso2: 'CM', name: 'Cameroon',          currency: 'XAF', dialCode: '+237' },
-  { iso2: 'UG', name: 'Uganda',            currency: 'UGX', dialCode: '+256' },
-  { iso2: 'KE', name: 'Kenya',             currency: 'KES', dialCode: '+254' },
-  { iso2: 'TZ', name: 'Tanzania',          currency: 'TZS', dialCode: '+255' },
-  { iso2: 'RW', name: 'Rwanda',            currency: 'RWF', dialCode: '+250' },
-  { iso2: 'BI', name: 'Burundi',           currency: 'BIF', dialCode: '+257' },
-  { iso2: 'GH', name: 'Ghana',             currency: 'GHS', dialCode: '+233' },
-  { iso2: 'ZM', name: 'Zambia',            currency: 'ZMW', dialCode: '+260' },
+  { iso2: 'CM', name: 'Cameroon', currency: 'XAF', dialCode: '+237' },
+  { iso2: 'UG', name: 'Uganda', currency: 'UGX', dialCode: '+256' },
+  { iso2: 'KE', name: 'Kenya', currency: 'KES', dialCode: '+254' },
+  { iso2: 'TZ', name: 'Tanzania', currency: 'TZS', dialCode: '+255' },
+  { iso2: 'RW', name: 'Rwanda', currency: 'RWF', dialCode: '+250' },
+  { iso2: 'BI', name: 'Burundi', currency: 'BIF', dialCode: '+257' },
+  { iso2: 'GH', name: 'Ghana', currency: 'GHS', dialCode: '+233' },
+  { iso2: 'ZM', name: 'Zambia', currency: 'ZMW', dialCode: '+260' },
   { iso2: 'GQ', name: 'Equatorial Guinea', currency: 'XAF', dialCode: '+240' },
-  { iso2: 'MY', name: 'Malaysia',          currency: 'MYR', dialCode: '+60'  },
+  { iso2: 'ZA', name: 'South Africa', currency: 'ZAR', dialCode: '+27' },
+  { iso2: 'NG', name: 'Nigeria', currency: 'NGN', dialCode: '+234' },
+  { iso2: 'MY', name: 'Malaysia', currency: 'MYR', dialCode: '+60' },
 ];
 
 const methods = [
@@ -73,9 +75,17 @@ const providers = [
   // ── Equatorial Guinea (GQ) — shares XAF with CM ────────────────
   { providerCode: 'mtn_gq', name: 'MTN Mobile Money', country: 'GQ', method: 'MOBILE_MONEY', requiresType: false },
 
+  // ── South Africa (ZA) — BANK collection + payout ──────────────
+  { providerCode: 'fnb_za', name: 'FNB', country: 'ZA', method: 'BANK', requiresType: false },
+  { providerCode: 'standard_za', name: 'Standard Bank', country: 'ZA', method: 'BANK', requiresType: false },
+  { providerCode: 'absa_za', name: 'ABSA', country: 'ZA', method: 'BANK', requiresType: false },
+
+  // ── Nigeria (NG) — CARD collection only ────────────────────────
+  { providerCode: 'card_ng', name: 'Card Payment', country: 'NG', method: 'CARD', requiresType: false },
+
   // ── Malaysia (MY) ──────────────────────────────────────────────
   { providerCode: 'maybank_my', name: 'Maybank', country: 'MY', method: 'BANK', requiresType: false },
-  { providerCode: 'cimb_my',    name: 'CIMB',    country: 'MY', method: 'BANK', requiresType: false },
+  { providerCode: 'cimb_my', name: 'CIMB', country: 'MY', method: 'BANK', requiresType: false },
 ];
 
 async function main() {

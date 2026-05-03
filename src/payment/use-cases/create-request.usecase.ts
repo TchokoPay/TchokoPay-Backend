@@ -95,7 +95,7 @@ export class CreateRequestUseCase {
         currency: { connect: { id: targetCurrency.id } },
         // No quote yet - will be created when paid
         description: dto.description || 'Payment request',
-        country: 'CM',
+        country: dto.country?.trim().toUpperCase() || 'CM',
         paymentMethod: null, // Will be set when paid
         payoutMethod: dto.payoutMethod,
         flow: FlowType.REQUEST,

@@ -180,13 +180,19 @@ export class ProcessPaymentUseCase {
     // ============================
     // 3. CREATE INVOICE
     // ============================
+    // Resolve the country: explicit dto.country → derive from recipient phone → default CM
+    const country =
+      dto.country?.trim().toUpperCase() ||
+      (recipientPhone ? await this.countryFromPhone(recipientPhone) : null) ||
+      'CM';
+
     console.log('📋 Creating payment invoice');
     const invoice = await this.prisma.paymentInvoice.create({
       data: {
         reference: `INV-${Date.now()}`,
         amount: quote.targetAmount,
         currency: { connect: { id: quote.targetCurrencyId } },
-        country: 'CM',
+        country,
         quote: { connect: { id: quote.id } },
         description: dto.description || 'TchokoPay Payment',
         paymentMethod,
@@ -240,6 +246,12 @@ export class ProcessPaymentUseCase {
       // ✅ PAYIN - use paymentMethod provider
       const payinProvider = this.providerFactory.getProvider(paymentMethod, invoice.country);
 
+      // payerCountry drives which Netwalletpay collection provider is used.
+      // For same-country flows this equals invoice.country; for cross-country
+      // (e.g. UG payer → CM receiver) it must be the payer's country.
+      const payerCountry =
+        dto.payerCountry?.trim().toUpperCase() || invoice.country;
+
       if (payerResolution.requiresPhone) {
         console.log('📱 Payer phone required:', payerResolution.payerPhone);
         payinResponse = await payinProvider.payin({
@@ -249,7 +261,7 @@ export class ProcessPaymentUseCase {
           reference: invoice.reference,
           description: invoice.description || undefined,
           metadata: {
-            country: invoice.country,
+            country: payerCountry,
             method: paymentMethod,
             type: 'COLLECTION',
           },
@@ -261,6 +273,11 @@ export class ProcessPaymentUseCase {
           currency: quote.baseCurrency.code,
           reference: invoice.reference,
           description: invoice.description || undefined,
+          metadata: {
+            country: payerCountry,
+            method: paymentMethod,
+            type: 'COLLECTION',
+          },
         });
       }
 
@@ -582,5 +599,29 @@ export class ProcessPaymentUseCase {
     const m = paymentMethod.toUpperCase();
     if (m === 'LIGHTNING' || m === 'BTC') return 'blink';
     return 'netwalletpay'; // MOMO, ORANGE, CARD, BANK all go through Netwalletpay
+  }
+
+  /**
+   * Derive the ISO2 country code from a phone number by matching its dial-code
+   * prefix against every active country in the database.
+   * Longer dial codes are tried first to avoid e.g. +1 matching before +237.
+   * Falls back to 'CM' if no match is found.
+   */
+  private async countryFromPhone(phone: string): Promise<string> {
+    if (!phone) return 'CM';
+    const normalized = phone.startsWith('+') ? phone : `+${phone}`;
+    const countries = await this.prisma.country.findMany({
+      where: { isActive: true },
+      select: { iso2: true, dialCode: true },
+    });
+    const sorted = countries
+      .filter((c) => c.dialCode)
+      .sort((a, b) => (b.dialCode ?? '').length - (a.dialCode ?? '').length);
+    for (const c of sorted) {
+      if (c.dialCode && normalized.startsWith(c.dialCode)) {
+        return c.iso2;
+      }
+    }
+    return 'CM';
   }
 }

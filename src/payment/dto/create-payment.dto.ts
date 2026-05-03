@@ -569,6 +569,33 @@ Error cases:
   invoiceReference?: string;
 
   // ============================
+  // COUNTRY (ISO2 — recipient's country)
+  // ============================
+  @ApiPropertyOptional({
+    example: 'CM',
+    description: `ISO2 country of the RECEIVER (payout country).
+Determines which Netwalletpay providers are used for the payout leg.
+Defaults to CM (Cameroon) when omitted.
+Supported: CM, UG, KE, TZ, RW, BI, GH, ZM, GQ, ZA, NG, MY
+    `,
+  })
+  @IsOptional()
+  @IsString()
+  country?: string;
+
+  @ApiPropertyOptional({
+    example: 'CM',
+    description: `ISO2 country of the PAYER (payin country).
+Used to select the correct Netwalletpay collection provider and phone-number prefix.
+When omitted the system derives it from the payer phone prefix or falls back to 'country'.
+Supported: CM, UG, KE, TZ, RW, BI, GH, ZM, GQ, ZA, NG, MY
+    `,
+  })
+  @IsOptional()
+  @IsString()
+  payerCountry?: string;
+
+  // ============================
   // OPTIONAL: DESCRIPTION
   // ============================
   @ApiPropertyOptional({

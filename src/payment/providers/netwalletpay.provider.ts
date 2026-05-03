@@ -232,13 +232,25 @@ export class NetwalletpayProvider implements PaymentProvider {
     const { amount, currency, phone, reference, metadata } = data;
 
     const country = metadata?.country as NetwalletpayCountry;
-    const method = this.mapMethod(metadata?.method);
+    // Keep the raw payout method hint ('ORANGE', 'MOMO', etc.) BEFORE mapping it to
+    // the Netwalletpay method code ('MOBILE_MONEY'). This hint drives provider selection
+    // so that Orange payouts use orange_cm and MOMO payouts use mtn_cm.
+    const rawPayoutMethod = ((metadata?.method as string) || '').toUpperCase();
+    const method = this.mapMethod(rawPayoutMethod);
 
-    this.logger.log(`💸 Netwalletpay PAYOUT: ${method} in ${country} - ${amount} ${currency} to ${phone}`);
+    this.logger.log(
+      `💸 Netwalletpay PAYOUT: ${method} (${rawPayoutMethod}) in ${country} - ${amount} ${currency} to ${phone}`,
+    );
 
     try {
-      // Get provider information first
-      const providerInfo = await this.getProviderInfo('PAYOUT', method, country);
+      // Pass the raw payout method as a hint so provider selection picks the correct
+      // network (e.g. orange_cm for ORANGE, mtn_cm for MOMO).
+      const providerInfo = await this.getProviderInfo(
+        'PAYOUT',
+        method,
+        country,
+        rawPayoutMethod,
+      );
       const providerId = providerInfo?.methodProviderId || providerInfo?.id || 'mtn_cm';
       const methodType = this.getMethodType(country, method, providerInfo?.id);
       
@@ -417,10 +429,16 @@ export class NetwalletpayProvider implements PaymentProvider {
   /**
    * Get provider information for country and method
    */
-  private async getProviderInfo(paymentType: 'COLLECTION' | 'PAYOUT', method: NetwalletpayMethod, country: NetwalletpayCountry): Promise<any> {
+  private async getProviderInfo(
+    paymentType: 'COLLECTION' | 'PAYOUT',
+    method: NetwalletpayMethod,
+    country: NetwalletpayCountry,
+    /** Raw method hint before mapping (e.g. 'ORANGE', 'MOMO') — used to pick the right sub-provider */
+    methodHint?: string,
+  ): Promise<any> {
     try {
       // First try the dynamic DB configuration so provider selection is data-driven
-      const dbProvider = await this.getProviderFromDb(country, method);
+      const dbProvider = await this.getProviderFromDb(country, method, methodHint);
       if (dbProvider) {
         this.logger.log(`🔍 Using DB provider config for ${country}/${method}`, { dbProvider });
         return dbProvider;
@@ -612,9 +630,14 @@ export class NetwalletpayProvider implements PaymentProvider {
   }
 
   /**
-   * Get currency for a country
+   * Get provider from DB, preferring the sub-network that matches methodHint.
+   * For Cameroon MOBILE_MONEY: 'ORANGE' → orange_cm first; 'MOMO' → mtn_cm first.
    */
-  private async getProviderFromDb(country: NetwalletpayCountry, method: NetwalletpayMethod): Promise<any | null> {
+  private async getProviderFromDb(
+    country: NetwalletpayCountry,
+    method: NetwalletpayMethod,
+    methodHint?: string,
+  ): Promise<any> {
     const mappedMethod = method === 'NETWALLET_PAY' ? 'NETWALLET_PAY' : method;
 
     const providers = await this.prisma.paymentProvider.findMany({
@@ -631,12 +654,22 @@ export class NetwalletpayProvider implements PaymentProvider {
 
     if (!providers.length) return null;
 
-    // Priority order for CM MOBILE_MONEY: mtn_cm → orange_cm → netwallet_cm → eu_cm
-    // mtn_cm is the most reliable direct carrier; eu_cm tends to cause 500s
-    const priority = ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm'];
+    // Build priority based on the raw method hint so the correct sub-network is chosen.
+    // Without this, Orange payouts would incorrectly use the MTN provider (→ error 4005).
+    const hint = methodHint?.toUpperCase();
+    const priority =
+      hint === 'ORANGE'
+        ? ['orange_cm', 'mtn_cm', 'netwallet_cm', 'eu_cm']
+        : hint === 'MOMO'
+          ? ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm']
+          : ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm'];
+
     const provider =
-      priority.reduce<(typeof providers)[0] | null>((found, code) => found ?? providers.find(p => p.providerCode === code) ?? null, null) ??
-      providers[0];
+      priority.reduce<(typeof providers)[0] | null>(
+        (found, code) =>
+          found ?? providers.find((p) => p.providerCode === code) ?? null,
+        null,
+      ) ?? providers[0];
 
     return {
       id: provider.providerCode,
