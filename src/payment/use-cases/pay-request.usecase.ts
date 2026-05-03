@@ -44,30 +44,32 @@ export class PayRequestUseCase {
     }
 
     const isGuest = !userId?.trim();
+    const paymentMethod = (dto.paymentMethod || 'MOMO')?.toUpperCase();
+    const requiresPayerPhone = paymentMethod === 'MOMO';
 
     let payerPhone: string | undefined;
-    if (isGuest) {
-      if (!dto.payerPhone) {
-        throw new BadRequestException(
-          'Guest payments require a payerPhone. Please provide your MOMO number.',
-        );
-      }
-      payerPhone = dto.payerPhone as string;
-    } else {
-      const payerContact = await this.prisma.userContact.findFirst({
-        where: { userId, type: 'PHONE', isVerified: true },
-      });
+    if (requiresPayerPhone) {
+      if (isGuest) {
+        if (!dto.payerPhone) {
+          throw new BadRequestException(
+            'Guest MOMO payments require a payerPhone. Please provide your MOMO number.',
+          );
+        }
+        payerPhone = dto.payerPhone as string;
+      } else {
+        const payerContact = await this.prisma.userContact.findFirst({
+          where: { userId, type: 'PHONE', isVerified: true },
+        });
 
-      if (!payerContact && !dto.payerPhone) {
-        throw new BadRequestException(
-          'No verified phone found. Please verify your phone in settings or provide payerPhone.',
-        );
-      }
+        if (!payerContact && !dto.payerPhone) {
+          throw new BadRequestException(
+            'No verified phone found. Please verify your phone in settings or provide payerPhone for MOMO payment.',
+          );
+        }
 
-      payerPhone = payerContact?.value ?? (dto.payerPhone as string | undefined);
+        payerPhone = payerContact?.value ?? (dto.payerPhone as string | undefined);
+      }
     }
-
-    const paymentMethod = (dto.paymentMethod || 'MOMO')?.toUpperCase();
 
     const paymentRequest = await this.prisma.paymentRequest.findFirst({
       where: {
