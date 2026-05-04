@@ -34,7 +34,11 @@ export class ContactsService {
       },
       skip: (Number(page) - 1) * Number(limit),
       take: Number(limit),
-      orderBy: { createdAt: 'desc' },
+      orderBy: [
+        { isPrimary: 'desc' },
+        { isVerified: 'desc' },
+        { createdAt: 'desc' },
+      ],
     });
   }
 
@@ -43,12 +47,13 @@ export class ContactsService {
   // =====================================================
   async addContact(userId: string, dto: AddContactDto) {
     const { type, value } = dto;
+    const normalizedValue = value.trim();
 
     this.logger.log(`Adding/updating ${type} for user ${userId}`);
 
     // 🚨 Check if this value already exists globally
     const existingGlobal = await this.prisma.userContact.findFirst({
-      where: { value },
+      where: { value: normalizedValue },
     });
 
     if (existingGlobal && existingGlobal.userId !== userId) {
@@ -57,49 +62,17 @@ export class ContactsService {
       );
     }
 
-    // 🔍 Check if user already has this type
-    const existingUserContact =
-      await this.prisma.userContact.findFirst({
-        where: { userId, type },
-      });
-
-    // ============================
-    // 🔄 UPDATE FLOW (CHANGE CONTACT)
-    // ============================
-    if (existingUserContact) {
-      // If same value → ignore
-      if (existingUserContact.value === value) {
-        throw new BadRequestException(
-          `This ${type} is already linked to your account`,
-        );
-      }
-
-      // Update existing contact (reset verification)
-      const updated = await this.prisma.userContact.update({
-        where: { id: existingUserContact.id },
-        data: {
-          value,
-          isVerified: false,
-        },
-      });
-
-      // Send OTP for new value
-      await this.otpService.sendOtp(updated.id);
-
-      return {
-        message: `${type} updated. OTP sent for verification.`,
-        contactId: updated.id,
-      };
+    if (existingGlobal && existingGlobal.userId === userId) {
+      throw new BadRequestException(
+        `This ${type} is already linked to your account`,
+      );
     }
 
-    // ============================
-    // ➕ CREATE FLOW (NEW CONTACT)
-    // ============================
     const contact = await this.prisma.userContact.create({
       data: {
         userId,
         type,
-        value,
+        value: normalizedValue,
         isPrimary: false,
         isVerified: false,
       },
@@ -114,19 +87,74 @@ export class ContactsService {
     };
   }
 
-  // =====================================================
-  // 🔁 RESEND OTP
-  // =====================================================
-  async resendOtp(contactId: string) {
+  async updateContact(
+    userId: string,
+    contactId: string,
+    dto: AddContactDto,
+  ) {
+    const { type, value } = dto;
+    const normalizedValue = value.trim();
+
     const contact = await this.prisma.userContact.findUnique({
       where: { id: contactId },
     });
 
-    if (!contact) {
+    if (!contact || contact.userId !== userId) {
       throw new NotFoundException('Contact not found');
     }
 
-    if (contact.isVerified) {
+    if (contact.type !== type) {
+      throw new BadRequestException('Contact type cannot be changed');
+    }
+
+    if (contact.value === normalizedValue && !contact.pendingValue) {
+      throw new BadRequestException('No contact changes detected');
+    }
+
+    const existingGlobal = await this.prisma.userContact.findFirst({
+      where: { value: normalizedValue },
+    });
+
+    if (existingGlobal && existingGlobal.userId !== userId) {
+      throw new BadRequestException(
+        `${type} already in use by another account`,
+      );
+    }
+
+    if (existingGlobal && existingGlobal.id !== contactId) {
+      throw new BadRequestException(
+        `This ${type} is already linked to your account`,
+      );
+    }
+
+    const updated = await this.prisma.userContact.update({
+      where: { id: contactId },
+      data: {
+        pendingValue: normalizedValue,
+      },
+    });
+
+    await this.otpService.sendOtp(updated.id);
+
+    return {
+      message: `${type} change pending. Verify with OTP to apply it.`,
+      contactId: updated.id,
+    };
+  }
+
+  // =====================================================
+  // 🔁 RESEND OTP
+  // =====================================================
+  async resendOtp(userId: string, contactId: string) {
+    const contact = await this.prisma.userContact.findUnique({
+      where: { id: contactId },
+    });
+
+    if (!contact || contact.userId !== userId) {
+      throw new NotFoundException('Contact not found');
+    }
+
+    if (contact.isVerified && !contact.pendingValue) {
       throw new BadRequestException('Contact already verified');
     }
 
@@ -138,24 +166,86 @@ export class ContactsService {
   // =====================================================
   // ✅ VERIFY CONTACT
   // =====================================================
-  async verifyContact(contactId: string, code: string) {
+  async verifyContact(userId: string, contactId: string, code: string) {
     const contact = await this.prisma.userContact.findUnique({
       where: { id: contactId },
     });
 
-    if (!contact) {
+    if (!contact || contact.userId !== userId) {
       throw new NotFoundException('Contact not found');
     }
 
     // 🔐 Verify OTP
     await this.otpService.verifyOtp(contact.id, code);
 
+    if (contact.pendingValue) {
+      const existingGlobal = await this.prisma.userContact.findFirst({
+        where: {
+          value: contact.pendingValue,
+          NOT: { id: contact.id },
+        },
+      });
+
+      if (existingGlobal) {
+        throw new BadRequestException(
+          `${contact.type} already in use by another account`,
+        );
+      }
+
+      await this.prisma.userContact.update({
+        where: { id: contact.id },
+        data: {
+          value: contact.pendingValue,
+          pendingValue: null,
+          isVerified: true,
+        },
+      });
+
+      return { message: 'Contact updated successfully' };
+    }
+
+    const hasPrimaryOfSameType = await this.prisma.userContact.findFirst({
+      where: {
+        userId,
+        type: contact.type,
+        isPrimary: true,
+        isVerified: true,
+        NOT: { id: contact.id },
+      },
+    });
+
     await this.prisma.userContact.update({
       where: { id: contact.id },
-      data: { isVerified: true },
+      data: {
+        isVerified: true,
+        isPrimary: hasPrimaryOfSameType ? contact.isPrimary : true,
+      },
     });
 
     return { message: 'Contact verified successfully' };
+  }
+
+  async cancelPendingChange(userId: string, contactId: string) {
+    const contact = await this.prisma.userContact.findUnique({
+      where: { id: contactId },
+    });
+
+    if (!contact || contact.userId !== userId) {
+      throw new NotFoundException('Contact not found');
+    }
+
+    if (!contact.pendingValue) {
+      throw new BadRequestException('No pending contact change found');
+    }
+
+    await this.prisma.userContact.update({
+      where: { id: contactId },
+      data: {
+        pendingValue: null,
+      },
+    });
+
+    return { message: 'Pending contact change cancelled' };
   }
 
   // =====================================================

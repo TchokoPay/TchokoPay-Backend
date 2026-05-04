@@ -44,7 +44,7 @@ export class OtpService {
     });
 
     const code = this.generateOtp();
-    const destination = String(contact?.value ?? contactId);
+    const destination = String(contact?.pendingValue ?? contact?.value ?? contactId);
     const type = String(contact?.type ?? 'UNKNOWN');
 
     this.logOtpIssued(type, destination, code);

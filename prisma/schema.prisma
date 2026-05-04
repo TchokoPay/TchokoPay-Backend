@@ -129,6 +129,7 @@ model UserContact {
   userId     String
   type       ContactType
   value      String
+  pendingValue String?
   isPrimary  Boolean     @default(false)
   isVerified Boolean     @default(false)
 

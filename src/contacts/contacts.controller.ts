@@ -64,6 +64,18 @@ export class ContactsController {
     return this.contactsService.addContact(user.userId, dto);
   }
 
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Update an existing contact. OTP required after change',
+  })
+  updateContact(
+    @CurrentUser() user: any,
+    @Param('id') contactId: string,
+    @Body() dto: AddContactDto,
+  ) {
+    return this.contactsService.updateContact(user.userId, contactId, dto);
+  }
+
   // =====================================================
   // 🔁 RESEND OTP
   // =====================================================
@@ -71,8 +83,11 @@ export class ContactsController {
   @ApiOperation({
     summary: 'Resend OTP for contact verification',
   })
-  resendOtp(@Param('id') contactId: string) {
-    return this.contactsService.resendOtp(contactId);
+  resendOtp(
+    @CurrentUser() user: any,
+    @Param('id') contactId: string,
+  ) {
+    return this.contactsService.resendOtp(user.userId, contactId);
   }
 
   // =====================================================
@@ -82,10 +97,28 @@ export class ContactsController {
   @ApiOperation({
     summary: 'Verify contact using OTP',
   })
-  verify(@Body() dto: VerifyContactDto) {
+  verify(
+    @CurrentUser() user: any,
+    @Body() dto: VerifyContactDto,
+  ) {
     return this.contactsService.verifyContact(
+      user.userId,
       dto.contactId,
       dto.code,
+    );
+  }
+
+  @Post(':id/cancel-pending-change')
+  @ApiOperation({
+    summary: 'Cancel a pending contact change',
+  })
+  cancelPendingChange(
+    @CurrentUser() user: any,
+    @Param('id') contactId: string,
+  ) {
+    return this.contactsService.cancelPendingChange(
+      user.userId,
+      contactId,
     );
   }
 
