@@ -7,6 +7,7 @@ import {
 
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { UserSettingsService } from '../users/services/user-settings.service.js';
+import { normalizePaymentHandle } from './payment-handle.util.js';
 
 @Injectable()
 export class PaymentIdentityService {
@@ -121,8 +122,9 @@ export class PaymentIdentityService {
   // RESOLVE HANDLE → USER
   // ============================
   async resolveHandle(handle: string) {
+    const normalizedHandle = normalizePaymentHandle(handle);
     const identity = await this.prisma.paymentIdentity.findUnique({
-      where: { handle },
+      where: { handle: normalizedHandle },
       include: { user: true },
     });
 
@@ -131,6 +133,57 @@ export class PaymentIdentityService {
     }
 
     return identity.user;
+  }
+
+  async getPublicCheckout(rawHandle: string) {
+    const normalizedHandle = normalizePaymentHandle(rawHandle);
+
+    const identity = await this.prisma.paymentIdentity.findUnique({
+      where: { handle: normalizedHandle },
+      include: {
+        user: true,
+      },
+    });
+
+    if (!identity || !identity.user) {
+      throw new BadRequestException('Invalid handle');
+    }
+
+    const payoutSetting =
+      await this.userSettings.getPrimaryVerifiedPayoutSetting(identity.userId);
+
+    if (!payoutSetting) {
+      throw new BadRequestException('This handle is not ready to receive payments');
+    }
+
+    const country = await this.prisma.country.findUnique({
+      where: { id: payoutSetting.countryId },
+      include: { currency: true },
+    });
+
+    if (!country) {
+      throw new BadRequestException('Recipient payout country is unavailable');
+    }
+
+    return {
+      handle: identity.handle,
+      recipient: {
+        firstName: identity.user.firstName,
+        lastName: identity.user.lastName,
+      },
+      payoutMethod: payoutSetting.paymentMethod,
+      payoutProvider: payoutSetting.provider.name,
+      country: {
+        iso2: country.iso2,
+        name: country.name,
+        dialCode: country.dialCode,
+      },
+      currency: {
+        code: country.currency.code,
+        name: country.currency.name,
+        symbol: country.currency.symbol,
+      },
+    };
   }
 
   // ============================

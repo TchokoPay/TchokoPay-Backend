@@ -85,6 +85,11 @@ enum DisputeStatus {
   REJECTED
 }
 
+enum UserRole {
+  USER
+  ADMIN
+}
+
 /**
  * =====================================================
  * USER MODULE (CORE IDENTITY)
@@ -96,11 +101,12 @@ model User {
   password       String?
   firstName      String
   lastName       String
-  profilePicture String? // NEW FIELD
+  profilePicture String?
   isActive       Boolean   @default(true)
+  role           UserRole  @default(USER)
   kycStatus      KycStatus @default(PENDING)
   googleId       String?   @unique
-  refreshToken   String? // ADD THIS
+  refreshToken   String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -848,6 +854,31 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+/**
+ * =====================================================
+ * ADMIN AUDIT LOG — records every admin action
+ * Required for fintech compliance and incident response.
+ * =====================================================
+ */
+model AdminAuditLog {
+  id         String  @id @default(uuid())
+  adminId    String
+  /// Human-readable action code e.g. USER_BANNED, KYC_APPROVED, ROLE_CHANGED
+  action     String
+  /// Which domain this action targets: USER | INVOICE | KYC | PRICING | SYSTEM
+  targetType String
+  targetId   String?
+  /// Extra context: old value, new value, reason, etc.
+  metadata   Json?
+  ipAddress  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([adminId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
 }
 
 /**

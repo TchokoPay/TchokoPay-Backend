@@ -5,6 +5,7 @@ import {
   Get,
   Req,
   UseGuards,
+  Param,
 } from '@nestjs/common';
 
 import { PaymentIdentityService } from './payment-identity.service.js';
@@ -16,6 +17,7 @@ import {
 } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
+import { Public } from '../auth/decorators/public.decorator.js';
 
 @ApiTags('Payment Identity')
 @ApiBearerAuth()
@@ -40,5 +42,12 @@ export class PaymentIdentityController {
   @ApiOperation({ summary: 'Get my payment identity' })
   me(@Req() req) {
     return this.service.getMyIdentity(req.user.userId);
+  }
+
+  @Public()
+  @Get('public/:handle')
+  @ApiOperation({ summary: 'Get public checkout details for a payment handle' })
+  publicHandle(@Param('handle') handle: string) {
+    return this.service.getPublicCheckout(handle);
   }
 }

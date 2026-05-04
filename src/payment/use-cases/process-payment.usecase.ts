@@ -14,6 +14,7 @@ import { PhoneResolutionService } from '../services/phone-resolution.service.js'
 import { PaymentEventService } from '../services/payment-event.service.js';
 import { PaymentPollingService, PollingProvider } from '../services/payment-polling.service.js';
 import { UserSettingsService } from '../../users/services/user-settings.service.js';
+import { normalizePaymentHandle } from '../../payment-identity/payment-handle.util.js';
 
 @Injectable()
 export class ProcessPaymentUseCase {
@@ -158,8 +159,10 @@ export class ProcessPaymentUseCase {
         throw new BadRequestException('recipientHandle is required for QR flow');
       }
 
+      const normalizedHandle = normalizePaymentHandle(dto.recipientHandle);
+
       const identity = await this.prisma.paymentIdentity.findUnique({
-        where: { handle: dto.recipientHandle },
+        where: { handle: normalizedHandle },
         include: { user: true },
       });
 
