@@ -112,6 +112,28 @@ export class AuthController {
     };
   }
 
+  @Public()
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Resend account verification OTP',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        identifier: {
+          type: 'string',
+          example: 'you@example.com',
+        },
+      },
+      required: ['identifier'],
+    },
+  })
+  async resendVerification(@Body('identifier') identifier: string) {
+    return this.authService.resendVerificationOtp(identifier);
+  }
+
   // =========================
   // 🔐 LOGIN (ONLY VERIFIED USERS)
   // =========================

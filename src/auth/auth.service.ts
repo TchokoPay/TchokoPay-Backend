@@ -207,6 +207,30 @@ export class AuthService {
     };
   }
 
+  async resendVerificationOtp(identifier: string) {
+    const normalizedIdentifier = identifier.trim().toLowerCase();
+
+    const contact = await this.prisma.userContact.findFirst({
+      where: {
+        value: normalizedIdentifier,
+      },
+    });
+
+    if (!contact) {
+      throw new BadRequestException('Account not found');
+    }
+
+    if (contact.isVerified) {
+      throw new BadRequestException('This account is already verified');
+    }
+
+    await this.otpService.sendOtp(contact.id);
+
+    return {
+      message: 'Verification code sent',
+    };
+  }
+
   // =====================================================
   // 🔑 LOGIN (STRICT VERIFICATION REQUIRED)
   // =====================================================
@@ -322,6 +346,7 @@ export class AuthService {
     const googleUser = await this.googleAuth.verifyGoogleToken(token);
 
     const email = googleUser.email.toLowerCase();
+    let authFlow: 'created' | 'linked' | 'signin' = 'signin';
 
     const existingContact = await this.prisma.userContact.findUnique({
       where: { value: email },
@@ -343,6 +368,7 @@ export class AuthService {
     }
 
     if (!user) {
+      authFlow = 'created';
       user = await this.prisma.user.create({
         data: {
           firstName: googleUser.firstName || 'Google',
@@ -360,6 +386,7 @@ export class AuthService {
         },
       });
     } else {
+      authFlow = user.googleId ? 'signin' : 'linked';
       user = await this.prisma.user.update({
         where: { id: user.id },
         data: {
@@ -407,6 +434,7 @@ export class AuthService {
 
     return {
       ...tokens,
+      authFlow,
       user: {
         id: user.id,
         firstName: user.firstName,
