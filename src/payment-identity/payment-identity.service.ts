@@ -6,36 +6,16 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { UserSettingsService } from '../users/services/user-settings.service.js';
 
 @Injectable()
 export class PaymentIdentityService {
   private readonly logger = new Logger(PaymentIdentityService.name);
 
-  constructor(private prisma: PrismaService) {}
-
-  // ============================
-  // GET VERIFIED PHONE (PRIMARY PAYOUT SOURCE)
-  // ============================
-  private async getVerifiedPhone(userId: string): Promise<string> {
-    const contact = await this.prisma.userContact.findFirst({
-      where: {
-        userId,
-        type: 'PHONE',
-        isVerified: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-
-    if (!contact) {
-      throw new BadRequestException(
-        'Verify your phone number before creating a payment handle',
-      );
-    }
-
-    return contact.value;
-  }
+  constructor(
+    private prisma: PrismaService,
+    private userSettings: UserSettingsService,
+  ) {}
 
   // ============================
   // CLEAN NAME
@@ -77,16 +57,7 @@ export class PaymentIdentityService {
   async create(userId: string) {
     this.logger.log(`Creating payment identity for user ${userId}`);
 
-    // 1. CHECK IF ALREADY EXISTS
-    const existing = await this.prisma.paymentIdentity.findUnique({
-      where: { userId },
-    });
-
-    if (existing) {
-      return existing;
-    }
-
-    // 2. GET USER
+    // 1. GET USER
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
     });
@@ -95,8 +66,24 @@ export class PaymentIdentityService {
       throw new BadRequestException('User not found');
     }
 
-    // 3. ENSURE VERIFIED PHONE EXISTS
-    await this.getVerifiedPhone(userId);
+    // 2. ENSURE VERIFIED PRIMARY PAYOUT EXISTS
+    const payoutSetting =
+      await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
+
+    if (!payoutSetting) {
+      throw new BadRequestException(
+        'Set and verify a primary payout number before creating a payment handle',
+      );
+    }
+
+    // 3. CHECK IF ALREADY EXISTS
+    const existing = await this.prisma.paymentIdentity.findUnique({
+      where: { userId },
+    });
+
+    if (existing) {
+      return existing;
+    }
 
     // 4. GENERATE HANDLE
     const handle = await this.generateUniqueHandle(user.firstName);
@@ -118,6 +105,13 @@ export class PaymentIdentityService {
   // GET MY IDENTITY
   // ============================
   async getMyIdentity(userId: string) {
+    const payoutSetting =
+      await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
+
+    if (!payoutSetting) {
+      return null;
+    }
+
     return this.prisma.paymentIdentity.findUnique({
       where: { userId },
     });
@@ -143,6 +137,15 @@ export class PaymentIdentityService {
   // GET PAYOUT PHONE (FOR MOMO)
   // ============================
   async getPayoutPhone(userId: string): Promise<string> {
-    return this.getVerifiedPhone(userId);
+    const payoutSetting =
+      await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
+
+    if (!payoutSetting) {
+      throw new BadRequestException(
+        'No verified primary payout number found',
+      );
+    }
+
+    return payoutSetting.phone;
   }
 }

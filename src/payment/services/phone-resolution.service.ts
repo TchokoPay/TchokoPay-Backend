@@ -1,5 +1,6 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service.js';
+import { UserSettingsService } from '../../users/services/user-settings.service.js';
 
 export interface PhoneResolutionResult {
   payerPhone: string | null;
@@ -10,7 +11,10 @@ export interface PhoneResolutionResult {
 
 @Injectable()
 export class PhoneResolutionService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private userSettings: UserSettingsService,
+  ) {}
 
   /**
    * Resolve payer phone based on payment method and user type
@@ -67,21 +71,22 @@ export class PhoneResolutionService {
 
     // ✅ MOBILE MONEY - Must have verified phone
     if (['MOMO', 'ORANGE'].includes(method)) {
-      const contact = await this.prisma.userContact.findFirst({
-        where: {
-          userId: recipientId,
-          type: 'PHONE',
-          isVerified: true,
-        },
-      });
+      const setting =
+        await this.userSettings.getPrimaryVerifiedPayoutSetting(recipientId);
 
-      if (!contact) {
+      if (!setting) {
         throw new BadRequestException(
-          'Recipient must have a verified phone number for MOMO/ORANGE payout',
+          'Recipient must have a verified primary payout number for mobile money payouts',
         );
       }
 
-      return contact.value;
+      if (setting.paymentMethod !== method) {
+        throw new BadRequestException(
+          `Recipient is not configured for ${method} payout`,
+        );
+      }
+
+      return setting.phone;
     }
 
     // ✅ BANK - No phone needed (uses bank account info)

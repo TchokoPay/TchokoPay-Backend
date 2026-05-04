@@ -110,6 +110,8 @@ model User {
   transactions    Transaction[]
   kyc             Kyc?
   paymentRequests PaymentRequest[]
+  paymentPreference    UserPaymentPreference?
+  paymentPhoneSettings UserPaymentPhoneSettings[]
 
   paymentIdentity   PaymentIdentity? // 👈 NEW
   recipientInvoices PaymentInvoice[] @relation("RecipientInvoices")
@@ -138,8 +140,6 @@ model UserContact {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  verificationCodes VerificationCode[]
-
   @@unique([userId, type])
   @@unique([value])
   @@index([userId])
@@ -151,17 +151,19 @@ model UserContact {
  * =====================================================
  */
 
-model VerificationCode {
+model OtpCode {
   id        String   @id @default(uuid())
-  contactId String
+  scope     String
+  subjectId String
+  channel   String
+  destination String
   code      String
   expiresAt DateTime
 
   createdAt DateTime @default(now())
 
-  contact UserContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
-
-  @@index([contactId])
+  @@index([scope, subjectId])
+  @@index([destination])
 }
 
 /**
@@ -253,6 +255,7 @@ model Country {
   isActive    Boolean  @default(true)
 
   providers   PaymentProvider[]
+  userPaymentPhoneSettings UserPaymentPhoneSettings[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -313,6 +316,7 @@ model PaymentProvider {
   method       PaymentMethodRef  @relation(fields: [methodId], references: [id])
   requiresType Boolean           @default(false)
   isActive     Boolean           @default(true)
+  userPaymentPhoneSettings UserPaymentPhoneSettings[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -541,6 +545,48 @@ model PaymentIdentity {
   @@index([handle])
 }
 
+model UserPaymentPreference {
+  id String @id @default(uuid())
+
+  userId String @unique
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  defaultPaymentMethod String @default("MOMO")
+  defaultPayoutMethod String @default("MOMO")
+  autoRefund Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model UserPaymentPhoneSettings {
+  id String @id @default(uuid())
+
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  paymentMethod String
+  phone String @unique
+
+  countryId String
+  country Country @relation(fields: [countryId], references: [id])
+
+  providerId String
+  provider PaymentProvider @relation(fields: [providerId], references: [id])
+
+  isPrimary Boolean @default(false)
+  isVerified Boolean @default(false)
+  isUserConfirmed Boolean @default(true)
+  verifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([countryId])
+  @@index([providerId])
+}
+
 /**
  * =====================================================
  * PAYMENT INVOICE (CORE ENGINE)
@@ -573,6 +619,7 @@ model PaymentInvoice {
   recipientName  String?
 
   payoutMethod String // MOMO, ORANGE, etc.
+  payoutProviderCode String?
 
   status TransactionStatus @default(PENDING)
 

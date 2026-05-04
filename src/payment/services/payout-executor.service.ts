@@ -94,6 +94,7 @@ export class PayoutExecutorService {
         metadata: {
           country: invoice.country,
           method: invoice.payoutMethod,
+          providerCode: invoice.payoutProviderCode,
           type: 'PAYOUT',
         },
       });

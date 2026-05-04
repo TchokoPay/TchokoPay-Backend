@@ -3,12 +3,14 @@ import { QuoteService } from '../../quote/quote.service.js';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { FlowType, PaymentAction } from '../enums/payment.enums.js';
 import { Prisma } from '@prisma/client';
+import { UserSettingsService } from '../../users/services/user-settings.service.js';
 
 @Injectable()
 export class CreateRequestUseCase {
   constructor(
     private quoteService: QuoteService,
     private prisma: PrismaService,
+    private userSettings: UserSettingsService,
   ) {}
 
   async execute(userId: string, dto: any) {
@@ -48,19 +50,25 @@ export class CreateRequestUseCase {
 
     let requesterPhone: string | null = null;
     let requesterName: string = 'Guest User';
+    let payoutMethod = dto.payoutMethod;
+    let country = dto.country?.trim().toUpperCase() || 'CM';
+    let payoutProviderCode: string | null = null;
 
     if (requester) {
-      // Registered user - auto-fetch verified phone
-      const contact = await this.prisma.userContact.findFirst({
-        where: { userId, type: 'PHONE', isVerified: true },
-      });
+      const payoutSetting =
+        await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
 
-      if (!contact) {
-        throw new BadRequestException('Registered user must have a verified phone contact');
+      if (!payoutSetting) {
+        throw new BadRequestException(
+          'Registered user must set and verify a primary payout number',
+        );
       }
 
-      requesterPhone = contact.value;
+      requesterPhone = payoutSetting.phone;
       requesterName = `${requester.firstName} ${requester.lastName}`;
+      payoutMethod = payoutSetting.paymentMethod;
+      country = payoutSetting.country.iso2;
+      payoutProviderCode = payoutSetting.provider.providerCode;
     } else {
       // Guest user - use provided receive phone
       if (!requestedReceivePhone) {
@@ -95,9 +103,10 @@ export class CreateRequestUseCase {
         currency: { connect: { id: targetCurrency.id } },
         // No quote yet - will be created when paid
         description: dto.description || 'Payment request',
-        country: dto.country?.trim().toUpperCase() || 'CM',
+        country,
         paymentMethod: null, // Will be set when paid
-        payoutMethod: dto.payoutMethod,
+        payoutMethod,
+        payoutProviderCode,
         flow: FlowType.REQUEST,
         recipient: requester ? { connect: { id: requester.id } } : undefined,
         recipientPhone: requesterPhone,

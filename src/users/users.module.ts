@@ -5,9 +5,10 @@ import { UsersController } from './users.controller.js';
 import { UserSettingsService } from './services/user-settings.service.js';
 import { PaymentSettingsController } from './controllers/payment-settings.controller.js';
 import { PrismaModule } from '../../prisma/prisma.module.js';
+import { OtpModule } from '../otp/otp.module.js';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, OtpModule],
   controllers: [UsersController, PaymentSettingsController],
   providers: [UsersService, UserSettingsService],
   exports: [UserSettingsService],

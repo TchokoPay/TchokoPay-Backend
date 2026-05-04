@@ -1,252 +1,438 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service.js';
+import { OtpService } from '../../otp/otp.service.js';
 
-/**
- * 🚀 FUTURE UPGRADE: User Payment Settings Service
- *
- * Manages user's payment method configurations:
- * - MOMO (phone-based)
- * - OM/Orange Money (phone-based)
- * - Banks (account-based)
- * - Crypto (wallet address-based)
- *
- * MVP Status:
- * - Structure is in place for future implementation
- * - Currently: System fetches verified contact from contacts table automatically
- * - These endpoints return basic structure, full customization coming soon
- *
- * Future Features:
- * - Users can configure multiple phones per method
- * - Bank account management
- * - Crypto wallet management
- * - Method prioritization
- * - KYC verification per method
- */
+type MobileMoneyProviderOption = {
+  id: string;
+  code: string;
+  name: string;
+  paymentMethod: string;
+  country: {
+    iso2: string;
+    name: string;
+    dialCode: string | null;
+  };
+};
+
 @Injectable()
 export class UserSettingsService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(UserSettingsService.name);
 
-  /**
-   * Get user's payment preferences
-   * Returns default preferences if user hasn't customized
-   */
-  async getPaymentPreferences(userId: string) {
-    const preferences = await this.prisma.userPaymentPreference.findUnique({
-      where: { userId },
+  constructor(
+    private prisma: PrismaService,
+    private otpService: OtpService,
+  ) {}
+
+  async getPaymentSettings(userId: string) {
+    const settings = await this.prisma.userPaymentPhoneSettings.findMany({
+      where: { userId, isUserConfirmed: true },
+      include: {
+        country: true,
+        provider: true,
+      },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'desc' }],
     });
 
-    // Return defaults if not found
-    if (!preferences) {
-      return {
-        userId,
-        defaultPaymentMethod: 'MOMO',
-        defaultPayoutMethod: 'MOMO',
-        autoRefund: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-    }
+    const primary = settings.find((setting) => setting.isPrimary) ?? null;
+    const bootstrapSuggestion =
+      settings.length === 0
+        ? await this.getBootstrapSuggestionFromVerifiedContact(userId)
+        : null;
 
-    return preferences;
+    return {
+      primary,
+      mobileMoneyNumbers: settings,
+      bootstrapSuggestion,
+    };
   }
 
-  /**
-   * Set user's payment preferences
-   */
-  async setPaymentPreferences(userId: string, data: any) {
-    const preferences = await this.prisma.userPaymentPreference.upsert({
-      where: { userId },
-      update: {
-        defaultPaymentMethod: data.defaultPaymentMethod,
-        defaultPayoutMethod: data.defaultPayoutMethod,
-        autoRefund: data.autoRefund,
+  async getSupportedMobileMoneyProviders(
+    countryIso2: string,
+  ): Promise<MobileMoneyProviderOption[]> {
+    const country = countryIso2.trim().toUpperCase();
+
+    const providers = await this.prisma.paymentProvider.findMany({
+      where: {
+        aggregator: { code: 'netwalletpay', isActive: true },
+        country: { iso2: country, isActive: true },
+        method: { code: 'MOBILE_MONEY', isActive: true },
+        isActive: true,
       },
-      create: {
-        userId,
-        defaultPaymentMethod: data.defaultPaymentMethod || 'MOMO',
-        defaultPayoutMethod: data.defaultPayoutMethod || 'MOMO',
-        autoRefund: data.autoRefund || false,
+      include: {
+        country: true,
       },
+      orderBy: [{ providerCode: 'asc' }],
     });
 
-    return preferences;
+    return providers.map((provider) => ({
+      id: provider.id,
+      code: provider.providerCode,
+      name: provider.name,
+      paymentMethod: this.mapProviderCodeToPaymentMethod(provider.providerCode),
+      country: {
+        iso2: provider.country.iso2,
+        name: provider.country.name,
+        dialCode: provider.country.dialCode,
+      },
+    }));
   }
 
-  /**
-   * Get phone number for a specific payment method
-   * 
-   * MVP: Returns phone from userPaymentPhoneSettings table
-   * For now: System uses verified contact from contacts table automatically
-   * 
-   * Returns the phone associated with the payment method, or null if not set
-   */
-  async getPhoneForPaymentMethod(
+  async addMobileMoneyNumber(
     userId: string,
-    paymentMethod: string,
-  ): Promise<string | null> {
-    const phoneSettings = await this.prisma.userPaymentPhoneSettings.findFirst(
-      {
-        where: {
-          userId,
-          paymentMethod: paymentMethod.toUpperCase(),
-        },
-      },
+    input: {
+      country: string;
+      providerCode: string;
+      phone: string;
+    },
+  ) {
+    const provider = await this.getProviderForCountry(
+      input.country,
+      input.providerCode,
+    );
+    const normalizedPhone = this.normalizePhone(
+      input.phone,
+      provider.country.dialCode,
     );
 
-    return phoneSettings?.phone || null;
-  }
+    await this.ensurePhoneAvailable(userId, normalizedPhone);
 
-  /**
-   * Set phone number for a specific payment method
-   * 
-   * MVP: Stores in userPaymentPhoneSettings table for future use
-   * Current system still auto-fetches from verified contacts
-   */
-  async setPhoneForPaymentMethod(
-    userId: string,
-    paymentMethod: string,
-    phone: string,
-  ) {
-    // Validate phone format
-    if (!phone || phone.length < 9) {
-      throw new BadRequestException('Invalid phone number');
+    const existingForUser = await this.prisma.userPaymentPhoneSettings.findFirst({
+      where: {
+        userId,
+        phone: normalizedPhone,
+      },
+      include: {
+        country: true,
+        provider: true,
+      },
+    });
+
+    if (existingForUser?.isUserConfirmed) {
+      throw new BadRequestException(
+        'This mobile money number is already in your payout settings.',
+      );
     }
 
-    const phoneSettings = await this.prisma.userPaymentPhoneSettings.upsert({
-      where: {
-        userId_paymentMethod: {
-          userId,
-          paymentMethod: paymentMethod.toUpperCase(),
-        },
+    const settingsCount = await this.prisma.userPaymentPhoneSettings.count({
+      where: { userId, isUserConfirmed: true },
+    });
+
+    const setting = existingForUser
+      ? await this.prisma.userPaymentPhoneSettings.update({
+          where: { id: existingForUser.id },
+          data: {
+            paymentMethod: this.mapProviderCodeToPaymentMethod(
+              provider.providerCode,
+            ),
+            countryId: provider.countryId,
+            providerId: provider.id,
+            isPrimary: settingsCount === 0,
+            isVerified: false,
+            isUserConfirmed: true,
+            verifiedAt: null,
+          },
+          include: {
+            country: true,
+            provider: true,
+          },
+        })
+      : await this.prisma.userPaymentPhoneSettings.create({
+          data: {
+            userId,
+            paymentMethod: this.mapProviderCodeToPaymentMethod(
+              provider.providerCode,
+            ),
+            phone: normalizedPhone,
+            countryId: provider.countryId,
+            providerId: provider.id,
+            isPrimary: settingsCount === 0,
+            isVerified: false,
+            isUserConfirmed: true,
+          },
+          include: {
+            country: true,
+            provider: true,
+          },
+        });
+
+    await this.otpService.sendPaymentSettingOtp(setting.id);
+
+    return {
+      message: 'Mobile money number added. Verify it to use it for payouts.',
+      setting,
+    };
+  }
+
+  async resendMobileMoneyOtp(userId: string, settingId: string) {
+    const setting = await this.prisma.userPaymentPhoneSettings.findUnique({
+      where: { id: settingId },
+    });
+
+    if (!setting || setting.userId !== userId) {
+      throw new NotFoundException('Payout number not found');
+    }
+
+    if (setting.isVerified) {
+      throw new BadRequestException('This payout number is already verified');
+    }
+
+    await this.otpService.sendPaymentSettingOtp(setting.id);
+
+    return { message: 'Verification code sent' };
+  }
+
+  async verifyMobileMoneyNumber(
+    userId: string,
+    settingId: string,
+    code: string,
+  ) {
+    const setting = await this.prisma.userPaymentPhoneSettings.findUnique({
+      where: { id: settingId },
+      include: {
+        country: true,
+        provider: true,
       },
+    });
+
+    if (!setting || setting.userId !== userId) {
+      throw new NotFoundException('Payout number not found');
+    }
+
+    await this.otpService.verifyPaymentSettingOtp(setting.id, code);
+
+    const otherVerifiedPrimary =
+      await this.prisma.userPaymentPhoneSettings.findFirst({
+        where: {
+          userId,
+          isPrimary: true,
+          isVerified: true,
+          NOT: { id: setting.id },
+        },
+      });
+
+    const updated = await this.prisma.userPaymentPhoneSettings.update({
+      where: { id: setting.id },
+      data: {
+        isVerified: true,
+        verifiedAt: new Date(),
+        isUserConfirmed: true,
+        isPrimary: otherVerifiedPrimary ? setting.isPrimary : true,
+      },
+      include: {
+        country: true,
+        provider: true,
+      },
+    });
+
+    return {
+      message: 'Payout number verified successfully',
+      setting: updated,
+    };
+  }
+
+  async setPrimaryMobileMoneyNumber(userId: string, settingId: string) {
+    const setting = await this.prisma.userPaymentPhoneSettings.findUnique({
+      where: { id: settingId },
+    });
+
+    if (!setting || setting.userId !== userId) {
+      throw new NotFoundException('Payout number not found');
+    }
+
+    if (!setting.isVerified) {
+      throw new BadRequestException(
+        'Only verified payout numbers can be made primary',
+      );
+    }
+
+    if (!setting.isUserConfirmed) {
+      throw new BadRequestException(
+        'Choose and verify this payout route before making it primary',
+      );
+    }
+
+    await this.prisma.userPaymentPhoneSettings.updateMany({
+      where: { userId, isPrimary: true },
+      data: { isPrimary: false },
+    });
+
+    const updated = await this.prisma.userPaymentPhoneSettings.update({
+      where: { id: settingId },
+      data: { isPrimary: true },
+      include: {
+        country: true,
+        provider: true,
+      },
+    });
+
+    await this.prisma.userPaymentPreference.upsert({
+      where: { userId },
       update: {
-        phone,
+        defaultPayoutMethod: updated.paymentMethod,
       },
       create: {
         userId,
-        paymentMethod: paymentMethod.toUpperCase(),
-        phone,
+        defaultPaymentMethod: 'MOMO',
+        defaultPayoutMethod: updated.paymentMethod,
       },
     });
 
-    return phoneSettings;
+    return {
+      message: 'Primary payout number updated',
+      setting: updated,
+    };
   }
 
-  /**
-   * Get phone numbers for all payment methods user has configured
-   */
-  async getAllPhoneSettings(userId: string) {
-    const phoneSettings = await this.prisma.userPaymentPhoneSettings.findMany({
-      where: { userId },
-      select: {
-        paymentMethod: true,
-        phone: true,
-      },
-    });
+  async getPrimaryVerifiedPayoutSetting(userId: string) {
+    const primary =
+      (await this.prisma.userPaymentPhoneSettings.findFirst({
+        where: {
+          userId,
+          isPrimary: true,
+          isVerified: true,
+          isUserConfirmed: true,
+        },
+        include: {
+          country: true,
+          provider: true,
+        },
+      })) ??
+      (await this.prisma.userPaymentPhoneSettings.findFirst({
+        where: {
+          userId,
+          isVerified: true,
+          isUserConfirmed: true,
+        },
+        include: {
+          country: true,
+          provider: true,
+        },
+        orderBy: { createdAt: 'asc' },
+      }));
 
-    return phoneSettings;
+    return primary;
   }
-
-  /**
-   * Get phone for payout to a specific recipient
-   * Checks if user has a preferred payout method set
-   */
-  async getPhoneForPayoutMethod(
-    userId: string,
-    payoutMethod: string,
-  ): Promise<string | null> {
-    return this.getPhoneForPaymentMethod(userId, payoutMethod);
-  }
-
-  /**
-   * Get bank account for bank transfers
-   * 
-   * 🚀 FUTURE: Bank account management
-   */
-  async getBankAccount(userId: string) {
-    const account = await this.prisma.userBankAccount.findFirst({
+  private async getBootstrapSuggestionFromVerifiedContact(userId: string) {
+    const contact = await this.prisma.userContact.findFirst({
       where: {
         userId,
-        isVerified: true,
-      },
-    });
-
-    return account || null;
-  }
-
-  /**
-   * Get crypto wallet for crypto payouts
-   * 
-   * 🚀 FUTURE: Crypto wallet management
-   */
-  async getCryptoWallet(userId: string, cryptoType: string) {
-    const wallet = await this.prisma.userCryptoWallet.findFirst({
-      where: {
-        userId,
-        type: cryptoType.toUpperCase(),
-        isVerified: true,
-      },
-    });
-
-    return wallet || null;
-  }
-
-  /**
-   * Get all payout destinations for a user
-   * Used to show user what payment methods are available
-   * 
-   * MVP: Returns basic structure
-   * Future: Returns detailed info (phone, bank account, crypto wallet)
-   */
-  async getAvailablePayoutMethods(userId: string) {
-    const [phoneSettings, bankAccounts, cryptoWallets] = await Promise.all([
-      this.prisma.userPaymentPhoneSettings.findMany({
-        where: { userId },
-        select: { paymentMethod: true },
-      }),
-      this.prisma.userBankAccount.findMany({
-        where: { userId, isVerified: true },
-        select: { id: true, accountNumber: true },
-      }),
-      this.prisma.userCryptoWallet.findMany({
-        where: { userId, isVerified: true },
-        select: { type: true, address: true },
-      }),
-    ]);
-
-    const methods: Array<{
-      type: string;
-      method: string;
-      available: boolean;
-    }> = [];
-
-    // Add phone-based methods
-    for (const { paymentMethod } of phoneSettings) {
-      methods.push({
         type: 'PHONE',
-        method: paymentMethod,
-        available: true,
-      });
+        isVerified: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (!contact) {
+      return null;
     }
 
-    // Add bank methods
-    if (bankAccounts.length > 0) {
-      methods.push({
-        type: 'BANK',
-        method: 'BANK_TRANSFER',
-        available: true,
-      });
+    const country = await this.findCountryFromPhone(contact.value);
+    if (!country) {
+      return null;
     }
 
-    // Add crypto methods
-    for (const { type } of cryptoWallets) {
-      methods.push({
-        type: 'CRYPTO',
-        method: type,
-        available: true,
-      });
-    }
+    const normalizedPhone = this.normalizePhone(contact.value, country.dialCode);
+    const providers = await this.getSupportedMobileMoneyProviders(country.iso2);
 
-    return methods;
+    return {
+      phone: normalizedPhone,
+      country: {
+        iso2: country.iso2,
+        dialCode: country.dialCode,
+      },
+      requiresProviderSelection: providers.length !== 1,
+    };
   }
+
+  private async getProviderForCountry(countryIso2: string, providerCode: string) {
+    const provider = await this.prisma.paymentProvider.findFirst({
+      where: {
+        providerCode: providerCode.trim().toLowerCase(),
+        aggregator: { code: 'netwalletpay', isActive: true },
+        country: { iso2: countryIso2.trim().toUpperCase(), isActive: true },
+        method: { code: 'MOBILE_MONEY', isActive: true },
+        isActive: true,
+      },
+      include: {
+        country: true,
+      },
+    });
+
+    if (!provider) {
+      throw new BadRequestException('Unsupported mobile money provider');
+    }
+
+    return provider;
+  }
+
+  private async ensurePhoneAvailable(userId: string, phone: string) {
+    const existingSetting = await this.prisma.userPaymentPhoneSettings.findFirst({
+      where: {
+        phone,
+        NOT: { userId },
+      },
+    });
+
+    if (existingSetting) {
+      throw new BadRequestException(
+        'This number is already linked to another payout profile.',
+      );
+    }
+
+    const existingContact = await this.prisma.userContact.findFirst({
+      where: {
+        value: phone,
+        NOT: { userId },
+      },
+    });
+
+    if (existingContact) {
+      throw new BadRequestException(
+        'This number is already linked to another account.',
+      );
+    }
+  }
+
+  private normalizePhone(phone: string, dialCode: string | null) {
+    const digits = phone.replace(/[^\d+]/g, '');
+
+    if (digits.startsWith('+')) {
+      return digits;
+    }
+
+    const prefix = dialCode?.replace(/\s+/g, '') ?? '';
+    if (!prefix) {
+      throw new BadRequestException(
+        'This country is missing a dial code configuration.',
+      );
+    }
+
+    const countryDigits = prefix.replace('+', '');
+    const localDigits = digits.replace(/^0+/, '');
+
+    return `+${countryDigits}${localDigits}`;
+  }
+
+  private mapProviderCodeToPaymentMethod(providerCode: string) {
+    return providerCode.toLowerCase().includes('orange') ? 'ORANGE' : 'MOMO';
+  }
+
+  private async findCountryFromPhone(phone: string) {
+    const normalized = phone.startsWith('+') ? phone : `+${phone}`;
+    const countries = await this.prisma.country.findMany({
+      where: { isActive: true },
+      select: { id: true, iso2: true, dialCode: true },
+    });
+
+    return countries
+      .filter((country) => country.dialCode)
+      .sort((a, b) => (b.dialCode?.length ?? 0) - (a.dialCode?.length ?? 0))
+      .find((country) => normalized.startsWith(country.dialCode ?? ''));
+  }
+
 }

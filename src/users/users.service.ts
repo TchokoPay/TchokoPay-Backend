@@ -5,9 +5,12 @@ import {
   Logger,
 } from '@nestjs/common';
 import { TransactionStatus, type Prisma } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
+import { UserSettingsService } from './services/user-settings.service.js';
 
 import cloudinary from '../config/cloudinary.config.js';
 
@@ -56,7 +59,10 @@ type HistoryStage =
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private userSettings: UserSettingsService,
+  ) {}
 
   // =====================================================
   // 👤 GET CURRENT USER PROFILE
@@ -80,10 +86,17 @@ export class UsersService {
     }
 
     const { password, refreshToken, googleId, ...safeUser } = user;
+    const payoutSetting =
+      await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
 
     this.logger.log(`User fetched successfully: ${userId}`);
 
-    return safeUser;
+    return {
+      ...safeUser,
+      paymentIdentity: payoutSetting ? safeUser.paymentIdentity : null,
+      hasPassword: Boolean(password),
+      usesGoogleAuth: Boolean(googleId),
+    };
   }
 
   // =====================================================
@@ -116,7 +129,52 @@ export class UsersService {
 
     this.logger.log(`User updated successfully: ${userId}`);
 
-    return safeUser;
+    return {
+      ...safeUser,
+      hasPassword: Boolean(password),
+      usesGoogleAuth: Boolean(googleId),
+    };
+  }
+
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const { currentPassword, newPassword } = dto;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    if (!user.password) {
+      throw new BadRequestException(
+        'This account uses Google sign-in and does not have a password to change.',
+      );
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      throw new BadRequestException('Current password is incorrect');
+    }
+
+    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+    if (isSamePassword) {
+      throw new BadRequestException(
+        'New password must be different from your current password',
+      );
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+
+    this.logger.log(`Password changed successfully: ${userId}`);
+
+    return { message: 'Password changed successfully' };
   }
 
   // =====================================================
@@ -241,7 +299,11 @@ export class UsersService {
 
     this.logger.log(`Profile picture updated successfully: ${userId}`);
 
-    return safeUser;
+    return {
+      ...safeUser,
+      hasPassword: Boolean(password),
+      usesGoogleAuth: Boolean(googleId),
+    };
   }
 
   // =====================================================

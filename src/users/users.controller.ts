@@ -16,6 +16,7 @@ import { UsersService } from './users.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 
 import {
   ApiTags,
@@ -51,6 +52,15 @@ export class UsersController {
     @Body() dto: UpdateUserDto,
   ) {
     return this.usersService.updateUser(user.userId, dto);
+  }
+
+  @Patch('me/change-password')
+  @ApiOperation({ summary: 'Change account password' })
+  changePassword(
+    @CurrentUser() user: any,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.usersService.changePassword(user.userId, dto);
   }
 
   // =====================================================

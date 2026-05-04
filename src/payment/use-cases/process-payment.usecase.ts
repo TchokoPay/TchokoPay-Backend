@@ -13,6 +13,7 @@ import { FlowType, PaymentAction } from '../enums/payment.enums.js';
 import { PhoneResolutionService } from '../services/phone-resolution.service.js';
 import { PaymentEventService } from '../services/payment-event.service.js';
 import { PaymentPollingService, PollingProvider } from '../services/payment-polling.service.js';
+import { UserSettingsService } from '../../users/services/user-settings.service.js';
 
 @Injectable()
 export class ProcessPaymentUseCase {
@@ -23,6 +24,7 @@ export class ProcessPaymentUseCase {
     private phoneResolution: PhoneResolutionService,
     private paymentEventService: PaymentEventService,
     private pollingService: PaymentPollingService,
+    private userSettings: UserSettingsService,
   ) {}
 
   async execute({ userId, dto }: { userId: string; dto: CreatePaymentDto }) {
@@ -142,6 +144,8 @@ export class ProcessPaymentUseCase {
     let recipientPhone: string | null = null;
     let recipientName: string = 'External User';
     let payoutMethod: string = (dto.payoutMethod || quote.payoutMethod).toUpperCase();
+    let payoutProviderCode: string | null = null;
+    let recipientCountry: string | null = null;
 
     if (dto.flow === FlowType.DIRECT) {
       if (!dto.recipientPhone) {
@@ -165,15 +169,20 @@ export class ProcessPaymentUseCase {
 
       const recipientUser = identity.user;
       recipient = recipientUser;
-      
-      // ✅ FOR NOW: All QR payments use MOMO payout
-      // TODO: Upgrade to support BANK, CRYPTO in future
-      payoutMethod = 'MOMO';
 
-      recipientPhone = await this.phoneResolution.resolveRecipient(
-        recipientUser.id,
-        payoutMethod,
-      );
+      const payoutSetting =
+        await this.userSettings.getPrimaryVerifiedPayoutSetting(recipientUser.id);
+
+      if (!payoutSetting) {
+        throw new BadRequestException(
+          'Recipient has no verified primary payout setting',
+        );
+      }
+
+      payoutMethod = payoutSetting.paymentMethod;
+      recipientPhone = payoutSetting.phone;
+      payoutProviderCode = payoutSetting.provider.providerCode;
+      recipientCountry = payoutSetting.country.iso2;
       recipientName = `${recipientUser.firstName} ${recipientUser.lastName}`;
     }
 
@@ -182,6 +191,7 @@ export class ProcessPaymentUseCase {
     // ============================
     // Resolve the country: explicit dto.country → derive from recipient phone → default CM
     const country =
+      recipientCountry ||
       dto.country?.trim().toUpperCase() ||
       (recipientPhone ? await this.countryFromPhone(recipientPhone) : null) ||
       'CM';
@@ -197,6 +207,7 @@ export class ProcessPaymentUseCase {
         description: dto.description || 'TchokoPay Payment',
         paymentMethod,
         payoutMethod: payoutMethod,
+        payoutProviderCode,
         flow: dto.flow,
         recipient: recipient ? { connect: { id: recipient.id } } : undefined,
         recipientPhone,

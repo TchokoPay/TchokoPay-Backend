@@ -256,6 +256,7 @@ export class NetwalletpayProvider implements PaymentProvider {
         method,
         country,
         rawPayoutMethod,
+        metadata?.providerCode as string | undefined,
       );
       const providerId = providerInfo?.methodProviderId || providerInfo?.id || 'mtn_cm';
       const methodType = this.getMethodType(country, method, providerInfo?.id);
@@ -441,10 +442,11 @@ export class NetwalletpayProvider implements PaymentProvider {
     country: NetwalletpayCountry,
     /** Raw method hint before mapping (e.g. 'ORANGE', 'MOMO') — used to pick the right sub-provider */
     methodHint?: string,
+    preferredProviderCode?: string,
   ): Promise<any> {
     try {
       // First try the dynamic DB configuration so provider selection is data-driven
-      const dbProvider = await this.getProviderFromDb(country, method, methodHint);
+      const dbProvider = await this.getProviderFromDb(country, method, methodHint, preferredProviderCode);
       if (dbProvider) {
         this.logger.log(`🔍 Using DB provider config for ${country}/${method}`, { dbProvider });
         return dbProvider;
@@ -644,6 +646,7 @@ export class NetwalletpayProvider implements PaymentProvider {
     country: NetwalletpayCountry,
     method: NetwalletpayMethod,
     methodHint?: string,
+    preferredProviderCode?: string,
   ): Promise<any> {
     const mappedMethod = method === 'NETWALLET_PAY' ? 'NETWALLET_PAY' : method;
 
@@ -666,12 +669,14 @@ export class NetwalletpayProvider implements PaymentProvider {
     // Build priority based on the raw method hint so the correct sub-network is chosen.
     // Without this, Orange payouts would incorrectly use the MTN provider (→ error 4005).
     const hint = methodHint?.toUpperCase();
-    const priority =
-      hint === 'ORANGE'
+    const priority = [
+      ...(preferredProviderCode ? [preferredProviderCode.toLowerCase()] : []),
+      ...(hint === 'ORANGE'
         ? ['orange_cm', 'mtn_cm', 'netwallet_cm', 'eu_cm']
         : hint === 'MOMO'
           ? ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm']
-          : ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm'];
+          : ['mtn_cm', 'orange_cm', 'netwallet_cm', 'eu_cm']),
+    ];
 
     const provider =
       priority.reduce<(typeof providers)[0] | null>(
