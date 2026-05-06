@@ -2,14 +2,11 @@ import {
   Controller,
   Get,
   Patch,
-  Post,
   Body,
   Param,
   Query,
   Req,
   UseGuards,
-  HttpCode,
-  HttpStatus,
   ParseIntPipe,
   DefaultValuePipe,
 } from '@nestjs/common';
@@ -153,15 +150,4 @@ export class AdminController {
     return this.admin.getAuditLog({ page, limit: Math.min(limit, 200), adminId, action });
   }
 
-  // ── Bootstrap ─────────────────────────────────────────────────────────────
-
-  @Post('bootstrap')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Promote first admin (one-time, requires ADMIN_BOOTSTRAP_TOKEN)' })
-  bootstrap(
-    @Body('email') email: string,
-    @Body('bootstrapToken') bootstrapToken: string,
-  ) {
-    return this.admin.bootstrapAdmin(email, bootstrapToken);
-  }
 }

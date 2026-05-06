@@ -9,6 +9,6 @@ import { PrismaModule } from '../../prisma/prisma.module.js';
   imports: [PrismaModule, ConfigModule],
   controllers: [AdminController],
   providers: [AdminService, AdminGuard],
-  exports: [AdminGuard],
+  exports: [AdminGuard, AdminService],
 })
 export class AdminModule {}

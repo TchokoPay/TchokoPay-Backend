@@ -17,6 +17,7 @@ import {
 } from '@nestjs/swagger';
 
 import { AuthService } from './auth.service.js';
+import { AdminService } from '../admin/admin.service.js';
 
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
@@ -58,7 +59,10 @@ function refreshCookieOptions(): CookieOptions {
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private adminService: AdminService,
+  ) {}
 
   @Public()
   @Get('google/config')
@@ -235,6 +239,20 @@ export class AuthController {
     return {
       accessToken: tokens.accessToken,
     };
+  }
+
+  // =========================
+  // 🔑 ADMIN BOOTSTRAP (one-time, token-gated)
+  // =========================
+  @Public()
+  @Post('admin/bootstrap')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Promote first admin (requires ADMIN_BOOTSTRAP_TOKEN env var)' })
+  bootstrap(
+    @Body('email') email: string,
+    @Body('bootstrapToken') bootstrapToken: string,
+  ) {
+    return this.adminService.bootstrapAdmin(email, bootstrapToken);
   }
 
   // =========================
