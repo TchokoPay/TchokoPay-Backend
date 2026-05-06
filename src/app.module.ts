@@ -18,6 +18,8 @@ import { PaymentIdentityController } from './payment-identity/payment-identity.c
 import { PaymentIdentityService } from './payment-identity/payment-identity.service.js';
 import { PaymentIdentityModule } from './payment-identity/payment-identity.module.js';
 import { PaymentModule } from './payment/payment.module.js';
+import { AdminModule } from './admin/admin.module.js';
+import { EmailModule } from './email/email.module.js';
 
 @Module({
   imports: [
@@ -32,7 +34,9 @@ import { PaymentModule } from './payment/payment.module.js';
     QuoteModule,
     PricingModule,
     PaymentIdentityModule,
-    PaymentModule
+    PaymentModule,
+    AdminModule,
+    EmailModule,
   ],
   controllers: [AppController, QuoteController, PaymentIdentityController],
   providers: [AppService, QuoteService, PricingService, PaymentIdentityService],

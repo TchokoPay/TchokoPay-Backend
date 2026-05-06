@@ -5,32 +5,27 @@ export async function generateTokens(
   jwtService: JwtService,
   userId: string,
   identifier: string,
+  role: string = 'USER',
 ) {
   const payload = {
     sub: userId,
     identifier,
+    role,
   };
 
-  console.log('⚙️ Generating tokens for:', payload);
+  console.log('⚙️ Generating tokens for:', { sub: payload.sub, identifier: payload.identifier, role });
 
-  // 🔑 ACCESS TOKEN
+  // 🔑 ACCESS TOKEN (15 min)
   const accessToken = await jwtService.signAsync(payload, {
     secret: process.env.JWT_ACCESS_SECRET,
     expiresIn: '15m',
   });
 
-  // 🔁 REFRESH TOKEN
+  // 🔁 REFRESH TOKEN (7 days)
   const refreshToken = await jwtService.signAsync(payload, {
     secret: process.env.JWT_REFRESH_SECRET,
     expiresIn: '7d',
   });
 
-  console.log('✅ Tokens generated:');
-  console.log('ACCESS:', accessToken);
-  console.log('REFRESH:', refreshToken);
-
-  return {
-    accessToken,
-    refreshToken,
-  };
+  return { accessToken, refreshToken };
 }

@@ -11,6 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { UserSettingsService } from './services/user-settings.service.js';
+import { EmailService } from '../email/email.service.js';
 
 import cloudinary from '../config/cloudinary.config.js';
 
@@ -62,6 +63,7 @@ export class UsersService {
   constructor(
     private prisma: PrismaService,
     private userSettings: UserSettingsService,
+    private emailService: EmailService,
   ) {}
 
   // =====================================================
@@ -173,6 +175,14 @@ export class UsersService {
     });
 
     this.logger.log(`Password changed successfully: ${userId}`);
+
+    try {
+      await this.emailService.sendPasswordChangedNotice(userId);
+    } catch (error) {
+      this.logger.warn(
+        `Password change email failed for ${userId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     return { message: 'Password changed successfully' };
   }

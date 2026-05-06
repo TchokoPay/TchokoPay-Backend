@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { OtpService } from '../../otp/otp.service.js';
+import { EmailService } from '../../email/email.service.js';
 
 type MobileMoneyProviderOption = {
   id: string;
@@ -26,6 +27,7 @@ export class UserSettingsService {
   constructor(
     private prisma: PrismaService,
     private otpService: OtpService,
+    private emailService: EmailService,
   ) {}
 
   async getPaymentSettings(userId: string) {
@@ -229,6 +231,20 @@ export class UserSettingsService {
       },
     });
 
+    try {
+      await this.emailService.sendPayoutRouteVerifiedNotice({
+        userId,
+        phone: updated.phone,
+        providerName: updated.provider.name,
+        countryName: updated.country.name,
+        isPrimary: updated.isPrimary,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Payout verification email failed for ${updated.phone}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     return {
       message: 'Payout number verified successfully',
       setting: updated,
@@ -269,6 +285,19 @@ export class UserSettingsService {
         provider: true,
       },
     });
+
+    try {
+      await this.emailService.sendPrimaryPayoutChangedNotice({
+        userId,
+        phone: updated.phone,
+        providerName: updated.provider.name,
+        countryName: updated.country.name,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Primary payout email failed for ${updated.phone}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     await this.prisma.userPaymentPreference.upsert({
       where: { userId },

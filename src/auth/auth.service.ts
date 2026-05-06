@@ -17,6 +17,7 @@ import { VerifyDto } from './dto/verify.dto.js';
 import { GoogleAuthService } from '../google/google-auth.service.js';
 import { generateTokens } from './utils/tokens.js';
 import { OtpService } from '../otp/otp.service.js';
+import { EmailService } from '../email/email.service.js';
 
 @Injectable()
 export class AuthService {
@@ -27,7 +28,22 @@ export class AuthService {
     private jwtService: JwtService,
     private googleAuth: GoogleAuthService,
     private otpService: OtpService,
+    private emailService: EmailService,
   ) {}
+
+  private normalizeIdentifier(identifier: string) {
+    const trimmed = identifier.trim();
+    return trimmed.includes('@') ? trimmed.toLowerCase() : trimmed;
+  }
+
+  /** Fetch the user's role for embedding in the JWT payload. */
+  private async getUserRole(userId: string): Promise<string> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    return user?.role ?? 'USER';
+  }
 
   private async storeRefreshToken(userId: string, refreshToken: string) {
     const hashedRefreshToken = await bcrypt.hash(refreshToken, 10);
@@ -98,16 +114,39 @@ export class AuthService {
       }
     }
 
-    const identifier = (email || phone) as string;
+    const identifier = this.normalizeIdentifier((email || phone) as string);
 
     this.logger.log(`Signup attempt [${type}]: ${identifier}`);
 
     // ── Global uniqueness — across ALL users and ALL contact types ─────────────
     const existingContact = await this.prisma.userContact.findFirst({
       where: { value: identifier },
+      include: {
+        user: true,
+      },
     });
 
     if (existingContact) {
+      if (!existingContact.isVerified) {
+        const hashedPasswordRetry = await bcrypt.hash(password, 12);
+
+        await this.prisma.user.update({
+          where: { id: existingContact.userId },
+          data: {
+            firstName,
+            lastName,
+            password: hashedPasswordRetry,
+          },
+        });
+
+        await this.otpService.sendOtp(existingContact.id);
+
+        return {
+          message: 'Account pending verification. A new OTP has been sent.',
+          contactId: existingContact.id,
+        };
+      }
+
       if (type === 'EMAIL') {
         throw new BadRequestException(
           'An account with this email address already exists. Please sign in instead.',
@@ -156,10 +195,18 @@ export class AuthService {
   // ✅ VERIFY OTP (ACTIVATE ACCOUNT)
   // =====================================================
   async verifyOtp(dto: VerifyDto) {
-    const { identifier, code } = dto;
+    const normalizedIdentifier = this.normalizeIdentifier(dto.identifier);
+    const { code } = dto;
 
     const contact = await this.prisma.userContact.findFirst({
-      where: { value: identifier },
+      where: { value: normalizedIdentifier },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+          },
+        },
+      },
     });
 
     if (!contact) {
@@ -167,10 +214,12 @@ export class AuthService {
     }
 
     if (contact.isVerified) {
+      const role = await this.getUserRole(contact.userId);
       const tokens = await generateTokens(
         this.jwtService,
         contact.userId,
         contact.value,
+        role,
       );
 
       await this.storeRefreshToken(contact.userId, tokens.refreshToken);
@@ -193,13 +242,28 @@ export class AuthService {
     this.logger.log(`Contact verified: ${contact.value}`);
 
     // 🎟 Issue tokens AFTER verification
+    const role = await this.getUserRole(contact.userId);
     const tokens = await generateTokens(
       this.jwtService,
       contact.userId,
       contact.value,
+      role,
     );
 
     await this.storeRefreshToken(contact.userId, tokens.refreshToken);
+
+    if (contact.type === 'EMAIL') {
+      try {
+        await this.emailService.sendWelcomeEmail({
+          to: contact.value,
+          firstName: contact.user.firstName,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Welcome email failed for ${contact.value}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     return {
       message: 'Account verified successfully',
@@ -208,7 +272,7 @@ export class AuthService {
   }
 
   async resendVerificationOtp(identifier: string) {
-    const normalizedIdentifier = identifier.trim().toLowerCase();
+    const normalizedIdentifier = this.normalizeIdentifier(identifier);
 
     const contact = await this.prisma.userContact.findFirst({
       where: {
@@ -235,7 +299,8 @@ export class AuthService {
   // 🔑 LOGIN (STRICT VERIFICATION REQUIRED)
   // =====================================================
   async login(dto: LoginDto) {
-    const { identifier, password } = dto;
+    const identifier = this.normalizeIdentifier(dto.identifier);
+    const { password } = dto;
 
     const contact = await this.prisma.userContact.findFirst({
       where: { value: identifier },
@@ -273,6 +338,7 @@ export class AuthService {
       this.jwtService,
       contact.user.id,
       identifier,
+      contact.user.role,
     );
     await this.storeRefreshToken(contact.user.id, tokens.refreshToken);
 
@@ -283,8 +349,10 @@ export class AuthService {
   // 🔁 ADD NEW CONTACT (AFTER LOGIN ONLY)
   // =====================================================
   async addContact(userId: string, identifier: string) {
+    const normalizedIdentifier = this.normalizeIdentifier(identifier);
+
     const existing = await this.prisma.userContact.findFirst({
-      where: { value: identifier },
+      where: { value: normalizedIdentifier },
     });
 
     if (existing) {
@@ -293,13 +361,13 @@ export class AuthService {
       );
     }
 
-    const type = identifier.includes('@') ? 'EMAIL' : 'PHONE';
+    const type = normalizedIdentifier.includes('@') ? 'EMAIL' : 'PHONE';
 
     const contact = await this.prisma.userContact.create({
       data: {
         userId,
         type,
-        value: identifier,
+        value: normalizedIdentifier,
         isPrimary: false,
         isVerified: false,
       },
@@ -429,8 +497,27 @@ export class AuthService {
       this.jwtService,
       user.id,
       email,
+      user.role,
     );
     await this.storeRefreshToken(user.id, tokens.refreshToken);
+
+    try {
+      if (authFlow === 'created') {
+        await this.emailService.sendWelcomeEmail({
+          to: email,
+          firstName: user.firstName,
+        });
+      } else if (authFlow === 'linked') {
+        await this.emailService.sendGoogleLinkedEmail({
+          to: email,
+          firstName: user.firstName,
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Post-Google email failed for ${email}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     return {
       ...tokens,
@@ -469,6 +556,7 @@ export class AuthService {
       this.jwtService,
       user.id,
       identifier,
+      user.role,
     );
 
     await this.storeRefreshToken(user.id, tokens.refreshToken);

@@ -7,6 +7,7 @@ import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
 import { GoogleModule } from '../google/google.module.js';
 import { OtpModule } from '../otp/otp.module.js';
+import { EmailModule } from '../email/email.module.js';
 
 import { JwtStrategy } from './strategies/jwt.strategy.js';
 import { JwtAuthGuard } from './guards/jwt.guard.js';
@@ -21,6 +22,7 @@ import { APP_GUARD } from '@nestjs/core';
     }),
     GoogleModule,
     OtpModule,
+    EmailModule,
   ],
   providers: [
     AuthService,

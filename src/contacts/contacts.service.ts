@@ -7,6 +7,7 @@ import {
 
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { OtpService } from '../otp/otp.service.js';
+import { EmailService } from '../email/email.service.js';
 
 import { AddContactDto } from './dto/add-contact.dto.js';
 
@@ -17,6 +18,7 @@ export class ContactsService {
   constructor(
     private prisma: PrismaService,
     private otpService: OtpService,
+    private emailService: EmailService,
   ) {}
 
   // =====================================================
@@ -97,6 +99,13 @@ export class ContactsService {
 
     const contact = await this.prisma.userContact.findUnique({
       where: { id: contactId },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+          },
+        },
+      },
     });
 
     if (!contact || contact.userId !== userId) {
@@ -179,9 +188,11 @@ export class ContactsService {
     await this.otpService.verifyOtp(contact.id, code);
 
     if (contact.pendingValue) {
+      const nextValue = contact.pendingValue;
+      const previousValue = contact.value;
       const existingGlobal = await this.prisma.userContact.findFirst({
         where: {
-          value: contact.pendingValue,
+          value: nextValue,
           NOT: { id: contact.id },
         },
       });
@@ -195,11 +206,33 @@ export class ContactsService {
       await this.prisma.userContact.update({
         where: { id: contact.id },
         data: {
-          value: contact.pendingValue,
+          value: nextValue,
           pendingValue: null,
           isVerified: true,
         },
       });
+
+      if (contact.type === 'EMAIL') {
+        try {
+          await this.emailService.sendContactVerifiedEmail({
+            to: nextValue,
+            firstName: contact.user.firstName,
+            contactLabel: 'Email address',
+            value: nextValue,
+            changed: true,
+          });
+
+          await this.emailService.sendEmailAddressChangedAlert({
+            to: previousValue,
+            firstName: contact.user.firstName,
+            newEmail: nextValue,
+          });
+        } catch (error) {
+          this.logger.warn(
+            `Contact update email failed for ${nextValue}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
 
       return { message: 'Contact updated successfully' };
     }
@@ -221,6 +254,21 @@ export class ContactsService {
         isPrimary: hasPrimaryOfSameType ? contact.isPrimary : true,
       },
     });
+
+    if (contact.type === 'EMAIL') {
+      try {
+        await this.emailService.sendContactVerifiedEmail({
+          to: contact.value,
+          firstName: contact.user.firstName,
+          contactLabel: 'Email address',
+          value: contact.value,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Contact verification email failed for ${contact.value}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     return { message: 'Contact verified successfully' };
   }

@@ -1,5 +1,6 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { EmailService } from '../email/email.service.js';
 
 type OtpScope = 'USER_CONTACT' | 'PAYOUT_SETTING';
 
@@ -7,7 +8,10 @@ type OtpScope = 'USER_CONTACT' | 'PAYOUT_SETTING';
 export class OtpService {
   private readonly logger = new Logger(OtpService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private emailService: EmailService,
+  ) {}
 
   generateOtp(): string {
     return Math.floor(100000 + Math.random() * 900000).toString();
@@ -16,7 +20,20 @@ export class OtpService {
   async sendOtp(contactId: string) {
     const contact = await this.prisma.userContact.findUnique({
       where: { id: contactId },
+      include: {
+        user: {
+          select: {
+            firstName: true,
+          },
+        },
+      },
     });
+
+    const contactCount = contact
+      ? await this.prisma.userContact.count({
+          where: { userId: contact.userId },
+        })
+      : 0;
 
     const destination = String(
       contact?.pendingValue ?? contact?.value ?? contactId,
@@ -29,6 +46,17 @@ export class OtpService {
       destination,
       channel,
       label: channel,
+      emailMeta:
+        contact?.type === 'EMAIL'
+          ? {
+              firstName: contact.user.firstName,
+              purpose: contact.pendingValue
+                ? 'Confirm your new email address'
+                : !contact.isVerified && contact.isPrimary && contactCount === 1
+                  ? 'Verify your TchokoPay account'
+                  : 'Verify your email address',
+            }
+          : undefined,
     });
   }
 
@@ -77,6 +105,10 @@ export class OtpService {
     destination: string;
     channel: string;
     label: string;
+    emailMeta?: {
+      firstName?: string | null;
+      purpose: string;
+    };
   }) {
     await this.checkRateLimit(input.scope, input.subjectId);
 
@@ -84,7 +116,7 @@ export class OtpService {
 
     this.logOtpIssued(input.label, input.destination, code);
 
-    await this.prisma.otpCode.create({
+    const otp = await this.prisma.otpCode.create({
       data: {
         scope: input.scope,
         subjectId: input.subjectId,
@@ -94,6 +126,22 @@ export class OtpService {
         expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       },
     });
+
+    if (input.channel === 'EMAIL' && input.emailMeta) {
+      try {
+        await this.emailService.sendOtpEmail({
+          to: input.destination,
+          code,
+          firstName: input.emailMeta.firstName,
+          purpose: input.emailMeta.purpose,
+        });
+      } catch (error) {
+        await this.prisma.otpCode.delete({
+          where: { id: otp.id },
+        });
+        throw error;
+      }
+    }
 
     return code;
   }

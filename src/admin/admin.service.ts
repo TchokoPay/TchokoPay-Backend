@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
@@ -401,5 +402,3 @@ export class AdminService {
   }
 }
 
-// Need ForbiddenException import
-import { ForbiddenException } from '@nestjs/common';
