@@ -10,6 +10,18 @@ import { ConfigService } from '@nestjs/config';
 
 type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM';
 
+type FeeConfigInput = {
+  baseCurrencyCode?: string | null;
+  targetCurrencyCode?: string | null;
+  paymentMethod?: string | null;
+  payoutMethod?: string | null;
+  flow?: string | null;
+  feePercent?: number;
+  spreadPercent?: number;
+  priority?: number;
+  isActive?: boolean;
+};
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -376,6 +388,190 @@ export class AdminService {
     ]);
 
     return { data: logs, meta: { total, page, limit, pages: Math.ceil(total / limit) } };
+  }
+
+  // ── Analytics ─────────────────────────────────────────────────────────────
+
+  async getAnalytics(period: '7d' | '30d' | '90d' = '30d') {
+    const days = period === '7d' ? 7 : period === '30d' ? 30 : 90;
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    const [invoices, newUsers, totalUsers] = await Promise.all([
+      this.prisma.paymentInvoice.findMany({
+        where: { createdAt: { gte: since } },
+        select: {
+          status: true,
+          flow: true,
+          paymentMethod: true,
+          payoutMethod: true,
+          country: true,
+          amount: true,
+          createdAt: true,
+          quote: {
+            select: {
+              baseAmount: true,
+              fee: true,
+              baseCurrency: { select: { code: true } },
+              targetCurrency: { select: { code: true } },
+            },
+          },
+          currency: { select: { code: true } },
+        },
+      }),
+      this.prisma.user.findMany({
+        where: { createdAt: { gte: since } },
+        select: { createdAt: true },
+      }),
+      this.prisma.user.count(),
+    ]);
+
+    // Generate date array (ISO yyyy-mm-dd)
+    const dates: string[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      dates.push(d.toISOString().slice(0, 10));
+    }
+
+    type TxDay = { success: number; failed: number; total: number; volume: number; fees: number };
+    const txMap = new Map<string, TxDay>(
+      dates.map((d) => [d, { success: 0, failed: 0, total: 0, volume: 0, fees: 0 }]),
+    );
+    const userMap = new Map<string, number>(dates.map((d) => [d, 0]));
+
+    let totalVolume = 0, totalFees = 0, successCount = 0, failedCount = 0;
+    const methodMap = new Map<string, { count: number; volume: number }>();
+    const countryMap = new Map<string, { count: number; volume: number }>();
+    const corridorMap = new Map<string, { count: number; volume: number }>();
+
+    for (const inv of invoices) {
+      const day = inv.createdAt.toISOString().slice(0, 10);
+      const row = txMap.get(day) ?? { success: 0, failed: 0, total: 0, volume: 0, fees: 0 };
+      const amount = Number(inv.quote?.baseAmount ?? inv.amount);
+      const fee = Number(inv.quote?.fee ?? 0);
+
+      row.total++;
+      row.volume += amount;
+      totalVolume += amount;
+
+      if (inv.status === 'SUCCESS') {
+        row.success++;
+        row.fees += fee;
+        totalFees += fee;
+        successCount++;
+      } else if (inv.status === 'FAILED') {
+        row.failed++;
+        failedCount++;
+      }
+      txMap.set(day, row);
+
+      const method = inv.paymentMethod ?? 'UNKNOWN';
+      const mRow = methodMap.get(method) ?? { count: 0, volume: 0 };
+      mRow.count++;
+      mRow.volume += amount;
+      methodMap.set(method, mRow);
+
+      const country = inv.country ?? 'UNKNOWN';
+      const cRow = countryMap.get(country) ?? { count: 0, volume: 0 };
+      cRow.count++;
+      cRow.volume += amount;
+      countryMap.set(country, cRow);
+
+      const from = inv.quote?.baseCurrency?.code ?? inv.currency.code;
+      const to = inv.quote?.targetCurrency?.code ?? inv.currency.code;
+      const corridor = `${from}→${to}`;
+      const corrRow = corridorMap.get(corridor) ?? { count: 0, volume: 0 };
+      corrRow.count++;
+      corrRow.volume += amount;
+      corridorMap.set(corridor, corrRow);
+    }
+
+    for (const u of newUsers) {
+      const day = u.createdAt.toISOString().slice(0, 10);
+      userMap.set(day, (userMap.get(day) ?? 0) + 1);
+    }
+
+    return {
+      period,
+      summary: {
+        totalVolume: Math.round(totalVolume),
+        totalFees: Math.round(totalFees),
+        totalTransactions: invoices.length,
+        successCount,
+        failedCount,
+        successRate:
+          invoices.length > 0 ? Math.round((successCount / invoices.length) * 100) : 0,
+        avgTransactionValue:
+          invoices.length > 0 ? Math.round(totalVolume / invoices.length) : 0,
+        newUsers: newUsers.length,
+        totalUsers,
+      },
+      txChart: dates.map((date) => ({ date, ...(txMap.get(date)!) })),
+      userChart: dates.map((date) => ({ date, count: userMap.get(date) ?? 0 })),
+      byPaymentMethod: Array.from(methodMap.entries())
+        .map(([method, data]) => ({ method, ...data }))
+        .sort((a, b) => b.count - a.count),
+      byCountry: Array.from(countryMap.entries())
+        .map(([country, data]) => ({ country, ...data }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10),
+      topCorridors: Array.from(corridorMap.entries())
+        .map(([corridor, data]) => ({ corridor, ...data }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5),
+    };
+  }
+
+  // ── Admin-audited Pricing CRUD ────────────────────────────────────────────
+
+  async listAdminPricing() {
+    return this.prisma.feeConfig.findMany({ orderBy: { priority: 'desc' } });
+  }
+
+  async createPricing(adminId: string, dto: FeeConfigInput, ip?: string) {
+    const config = await this.prisma.feeConfig.create({
+      data: {
+        baseCurrencyCode: dto.baseCurrencyCode ?? null,
+        targetCurrencyCode: dto.targetCurrencyCode ?? null,
+        paymentMethod: dto.paymentMethod ?? null,
+        payoutMethod: dto.payoutMethod ?? null,
+        flow: dto.flow ?? null,
+        feePercent: dto.feePercent ?? 0,
+        spreadPercent: dto.spreadPercent ?? 0,
+        priority: dto.priority ?? 0,
+        isActive: dto.isActive ?? true,
+      },
+    });
+    await this.log(adminId, 'PRICING_CREATED', 'PRICING', config.id, { dto }, ip);
+    return config;
+  }
+
+  async updatePricing(adminId: string, id: string, dto: FeeConfigInput, ip?: string) {
+    const existing = await this.prisma.feeConfig.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Pricing rule not found');
+    const updated = await this.prisma.feeConfig.update({ where: { id }, data: dto });
+    await this.log(adminId, 'PRICING_UPDATED', 'PRICING', id, { changes: dto }, ip);
+    return updated;
+  }
+
+  async deletePricing(adminId: string, id: string, ip?: string) {
+    const existing = await this.prisma.feeConfig.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Pricing rule not found');
+    await this.prisma.feeConfig.delete({ where: { id } });
+    await this.log(adminId, 'PRICING_DELETED', 'PRICING', id, {}, ip);
+    return { message: 'Deleted' };
+  }
+
+  async togglePricing(adminId: string, id: string, ip?: string) {
+    const existing = await this.prisma.feeConfig.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Pricing rule not found');
+    const updated = await this.prisma.feeConfig.update({
+      where: { id },
+      data: { isActive: !existing.isActive },
+    });
+    await this.log(adminId, 'PRICING_TOGGLED', 'PRICING', id, { isActive: updated.isActive }, ip);
+    return updated;
   }
 
   // ── Bootstrap (create first admin) ───────────────────────────────────────

@@ -1,7 +1,9 @@
 import {
   Controller,
   Get,
+  Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -9,6 +11,8 @@ import {
   UseGuards,
   ParseIntPipe,
   DefaultValuePipe,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AdminService } from './admin.service.js';
@@ -32,22 +36,31 @@ export class AdminController {
     return this.admin.getStats();
   }
 
+  // ── Analytics ─────────────────────────────────────────────────────────────
+
+  @Get('analytics')
+  @ApiOperation({ summary: 'Time-series analytics for the given period' })
+  @ApiQuery({ name: 'period', required: false, enum: ['7d', '30d', '90d'] })
+  getAnalytics(@Query('period') period: '7d' | '30d' | '90d' = '30d') {
+    return this.admin.getAnalytics(period);
+  }
+
   // ── Users ─────────────────────────────────────────────────────────────────
 
   @Get('users')
   @ApiOperation({ summary: 'List all users with filters' })
-  @ApiQuery({ name: 'page',     required: false, example: 1 })
-  @ApiQuery({ name: 'limit',    required: false, example: 20 })
-  @ApiQuery({ name: 'search',   required: false })
-  @ApiQuery({ name: 'role',     required: false, enum: ['USER', 'ADMIN'] })
-  @ApiQuery({ name: 'isActive', required: false })
-  @ApiQuery({ name: 'kycStatus',required: false, enum: ['PENDING', 'VERIFIED', 'REJECTED'] })
+  @ApiQuery({ name: 'page',      required: false, example: 1 })
+  @ApiQuery({ name: 'limit',     required: false, example: 20 })
+  @ApiQuery({ name: 'search',    required: false })
+  @ApiQuery({ name: 'role',      required: false, enum: ['USER', 'ADMIN'] })
+  @ApiQuery({ name: 'isActive',  required: false })
+  @ApiQuery({ name: 'kycStatus', required: false, enum: ['PENDING', 'VERIFIED', 'REJECTED'] })
   listUsers(
-    @Query('page',    new DefaultValuePipe(1),  ParseIntPipe) page: number,
-    @Query('limit',   new DefaultValuePipe(20), ParseIntPipe) limit: number,
-    @Query('search')   search?: string,
-    @Query('role')     role?: string,
-    @Query('isActive') isActive?: string,
+    @Query('page',     new DefaultValuePipe(1),  ParseIntPipe) page: number,
+    @Query('limit',    new DefaultValuePipe(20), ParseIntPipe) limit: number,
+    @Query('search')    search?: string,
+    @Query('role')      role?: string,
+    @Query('isActive')  isActive?: string,
     @Query('kycStatus') kycStatus?: string,
   ) {
     return this.admin.listUsers({
@@ -137,6 +150,43 @@ export class AdminController {
     return this.admin.reviewKyc(req.user.userId, kycId, decision, reason, req.ip);
   }
 
+  // ── Pricing (admin-audited) ───────────────────────────────────────────────
+
+  @Get('pricing')
+  @ApiOperation({ summary: 'List all fee configurations' })
+  listPricing() {
+    return this.admin.listAdminPricing();
+  }
+
+  @Post('pricing')
+  @ApiOperation({ summary: 'Create a fee configuration rule' })
+  createPricing(@Req() req: AuthenticatedRequest, @Body() dto: Record<string, unknown>) {
+    return this.admin.createPricing(req.user.userId, dto, req.ip);
+  }
+
+  @Patch('pricing/:id')
+  @ApiOperation({ summary: 'Update a fee configuration rule' })
+  updatePricing(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: Record<string, unknown>,
+  ) {
+    return this.admin.updatePricing(req.user.userId, id, dto, req.ip);
+  }
+
+  @Delete('pricing/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a fee configuration rule' })
+  deletePricing(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.admin.deletePricing(req.user.userId, id, req.ip);
+  }
+
+  @Patch('pricing/:id/toggle')
+  @ApiOperation({ summary: 'Toggle a fee configuration active state' })
+  togglePricing(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.admin.togglePricing(req.user.userId, id, req.ip);
+  }
+
   // ── Audit log ─────────────────────────────────────────────────────────────
 
   @Get('audit-log')
@@ -149,5 +199,4 @@ export class AdminController {
   ) {
     return this.admin.getAuditLog({ page, limit: Math.min(limit, 200), adminId, action });
   }
-
 }
