@@ -144,15 +144,21 @@ export class NetwalletpayProvider implements PaymentProvider {
   async payin(data: PayinDto): Promise<any> {
     const { amount, currency, reference, phone, metadata } = data;
 
-    // Extract country and method from metadata
+    // Keep the raw collection method as a provider-selection hint.
     const country = metadata?.country as NetwalletpayCountry;
-    const method = this.mapMethod(metadata?.method);
+    const rawPaymentMethod = ((metadata?.method as string) || '').toUpperCase();
+    const method = this.mapMethod(rawPaymentMethod);
 
     this.logger.log(`🔄 Netwalletpay PAYIN: ${method} in ${country} - ${amount} ${currency} to ${phone}`);
 
     try {
-      // Get provider information first
-      const providerInfo = await this.getProviderInfo('COLLECTION', method, country);
+      const providerInfo = await this.getProviderInfo(
+        'COLLECTION',
+        method,
+        country,
+        rawPaymentMethod,
+        metadata?.providerCode as string | undefined,
+      );
       const providerId = providerInfo.id;
       const methodType = providerInfo.methodType || this.getMethodType(country, method, providerId);
 
@@ -162,6 +168,7 @@ export class NetwalletpayProvider implements PaymentProvider {
       this.logger.log(`📌 PAYIN Configuration:`, {
         country,
         method,
+        rawPaymentMethod,
         methodType,
         providerId,
         providerName: providerInfo.name,
@@ -472,7 +479,7 @@ export class NetwalletpayProvider implements PaymentProvider {
         return await this.getDefaultProvider(country, method);
       }
 
-      let selectedProvider = this.selectBestProvider(providers, country, paymentType, method);
+      let selectedProvider = this.selectBestProvider(providers, country, paymentType, method, methodHint);
       selectedProvider.methodType = (method === 'MOBILE_MONEY' && country === 'CM')
         ? this.getMethodTypeForProvider(selectedProvider.id)
         : '';
@@ -492,9 +499,18 @@ export class NetwalletpayProvider implements PaymentProvider {
   /**
    * Select the best provider based on country, payment type, and method
    */
-  private selectBestProvider(providers: any[], country: NetwalletpayCountry, paymentType: string, method: NetwalletpayMethod): any {
+  private selectBestProvider(providers: any[], country: NetwalletpayCountry, paymentType: string, method: NetwalletpayMethod, methodHint?: string): any {
     // For Cameroon mobile money, prefer providers in this order
     if (country === 'CM' && method === 'MOBILE_MONEY') {
+      const hint = methodHint?.toUpperCase();
+      if (hint === 'ORANGE') {
+        return providers.find((p: any) => p.id === 'orange_cm') ||
+               providers.find((p: any) => p.id === 'mtn_cm') ||
+               providers.find((p: any) => p.id === 'eu_cm') ||
+               providers.find((p: any) => p.id === 'netwallet_cm') ||
+               providers[0];
+      }
+
       if (paymentType === 'PAYOUT') {
         // For payout, prefer MTN first (most reliable), then Orange, then others
         return providers.find((p: any) => p.id === 'mtn_cm') ||

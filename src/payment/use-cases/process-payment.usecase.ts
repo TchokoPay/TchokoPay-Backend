@@ -258,7 +258,10 @@ export class ProcessPaymentUseCase {
     if (shouldProcessPayment) {
       console.log('💳 Processing PAYIN with:', paymentMethod);
       // ✅ PAYIN - use paymentMethod provider
-      const payinProvider = this.providerFactory.getProvider(paymentMethod, invoice.country);
+      const payinProvider = this.providerFactory.getProvider(
+        paymentMethod,
+        dto.payerCountry?.trim().toUpperCase() || invoice.country,
+      );
 
       // payerCountry drives which Netwalletpay collection provider is used.
       // For same-country flows this equals invoice.country; for cross-country

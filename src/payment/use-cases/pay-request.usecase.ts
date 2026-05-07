@@ -45,14 +45,14 @@ export class PayRequestUseCase {
 
     const isGuest = !userId?.trim();
     const paymentMethod = (dto.paymentMethod || 'MOMO')?.toUpperCase();
-    const requiresPayerPhone = paymentMethod === 'MOMO';
+    const requiresPayerPhone = ['MOMO', 'ORANGE'].includes(paymentMethod);
 
     let payerPhone: string | undefined;
     if (requiresPayerPhone) {
       if (isGuest) {
         if (!dto.payerPhone) {
           throw new BadRequestException(
-            'Guest MOMO payments require a payerPhone. Please provide your MOMO number.',
+            `Guest ${paymentMethod} payments require a payerPhone. Please provide your mobile money number.`,
           );
         }
         payerPhone = dto.payerPhone as string;
@@ -63,7 +63,7 @@ export class PayRequestUseCase {
 
         if (!payerContact && !dto.payerPhone) {
           throw new BadRequestException(
-            'No verified phone found. Please verify your phone in settings or provide payerPhone for MOMO payment.',
+            `No verified phone found. Please verify your phone in settings or provide payerPhone for ${paymentMethod} payment.`,
           );
         }
 
@@ -122,7 +122,11 @@ export class PayRequestUseCase {
       },
     });
 
-    const payinProvider = this.providerFactory.getProvider(paymentMethod, invoice.country);
+    const payerCountry =
+      (dto.payerCountry as string | undefined)?.trim().toUpperCase() ||
+      invoice.country;
+
+    const payinProvider = this.providerFactory.getProvider(paymentMethod, payerCountry);
     const payinResponse = await payinProvider.payin({
       amount: Number(quote.baseAmount),
       currency: quote.baseCurrency.code,
@@ -130,7 +134,7 @@ export class PayRequestUseCase {
       reference: invoice.reference,
       description: invoice.description || undefined,
       metadata: {
-        country: invoice.country,
+        country: payerCountry,
         method: paymentMethod,
         type: 'COLLECTION',
       },
