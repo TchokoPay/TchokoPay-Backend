@@ -689,4 +689,22 @@ Optional: If omitted, every request treated as new (not idempotent)
   @IsOptional()
   @IsString()
   idempotencyKey?: string;
+
+  /**
+   * Netwalletpay provider code for the PAYIN (payer's network).
+   * When provided, routes directly to this provider without auto-detection.
+   * Example: "mpesa_ke", "mtn_cm", "airtel_tz"
+   */
+  @IsOptional()
+  @IsString()
+  paymentProviderCode?: string;
+
+  /**
+   * Netwalletpay provider code for the PAYOUT (recipient's network).
+   * When provided, routes directly to this provider without auto-detection.
+   * Example: "mpesa_ke", "orange_cm", "bank_ng"
+   */
+  @IsOptional()
+  @IsString()
+  payoutProviderCode?: string;
 }

@@ -80,6 +80,6 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     // WebSocket Gateway
     PaymentGateway,
   ],
-  exports: [PaymentService],
+  exports: [PaymentService, NetwalletpayProvider],
 })
 export class PaymentModule {}

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { ConfigService } from '@nestjs/config';
+import { NetwalletpayProvider } from '../payment/providers/netwalletpay.provider.js';
 
 type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM';
 
@@ -29,6 +30,7 @@ export class AdminService {
   constructor(
     private prisma: PrismaService,
     private config: ConfigService,
+    private netwalletpay: NetwalletpayProvider,
   ) {}
 
   // ── Audit ─────────────────────────────────────────────────────────────────
@@ -700,6 +702,152 @@ export class AdminService {
         onlyInNetwalletpay: netwalletpayProviders.filter((p) => !dbCodes.has(p.id)).map((p) => p.id),
         onlyInDatabase:     dbProviders.filter((p) => !nwCodes.has(p.providerCode)).map((p) => p.providerCode),
       },
+    };
+  }
+
+  // ── Live transaction test — delegates to the shared NetwalletpayProvider ──
+
+  /**
+   * Tests a COLLECTION (payin) or PAYOUT against a specific provider by
+   * delegating to the same NetwalletpayProvider used in real payments.
+   * This means it gets all the same retry logic, phone formatting,
+   * MethodType handling, and fallback provider selection — no duplication.
+   *
+   * COLLECTION → triggers a payment prompt on the test phone.
+   * PAYOUT     → attempts to transfer real funds. Use with care.
+   */
+  async testTransaction(params: {
+    country: string;
+    providerCode: string;
+    paymentType: 'COLLECTION' | 'PAYOUT';
+    phone: string;
+    amount: number;
+    adminId: string;
+  }, ip?: string) {
+    const { country, providerCode, paymentType, phone, amount, adminId } = params;
+    const sep  = '─'.repeat(60);
+    const sep2 = '═'.repeat(60);
+
+    this.logger.log(sep2);
+    this.logger.log(`🧪  ADMIN TRANSACTION TEST  —  ${paymentType}`);
+    this.logger.log(sep2);
+    this.logger.log(`  Admin ID   : ${adminId}`);
+    this.logger.log(`  Country    : ${country}`);
+    this.logger.log(`  Provider   : ${providerCode}`);
+    this.logger.log(`  Phone/Acct : ${phone}`);
+    this.logger.log(`  Amount     : ${amount}`);
+    this.logger.log(`  IP         : ${ip ?? 'unknown'}`);
+    this.logger.log(sep);
+
+    // ── 1. Resolve provider from DB ───────────────────────────────────────────
+    this.logger.log('📋  STEP 1 — Resolve provider from DB');
+    const provider = await this.prisma.paymentProvider.findUnique({
+      where: { providerCode },
+      include: { country: { include: { currency: true } }, method: true },
+    });
+    if (!provider) {
+      this.logger.error(`  ❌ Provider not found in DB: ${providerCode}`);
+      throw new NotFoundException(`Provider not found: ${providerCode}`);
+    }
+    const currency   = provider.country.currency?.code ?? 'XAF';
+    const methodCode = provider.method.code; // MOBILE_MONEY | BANK | CARD
+    this.logger.log(`  ✔ Provider : ${provider.name} (${providerCode})`);
+    this.logger.log(`  ✔ Country  : ${provider.country.name} (${provider.country.iso2})`);
+    this.logger.log(`  ✔ Method   : ${methodCode}  Currency: ${currency}`);
+
+    // ── 2. Derive raw method hint ─────────────────────────────────────────────
+    // NetwalletpayProvider.getProviderFromDb uses this hint to pick the right
+    // sub-network (e.g. 'ORANGE' → orange_cm, 'MOMO' → mtn_cm).
+    this.logger.log(sep);
+    this.logger.log('🔧  STEP 2 — Derive method hint for provider selection');
+    const id = providerCode.toLowerCase();
+    let methodHint: string;
+    if (methodCode === 'BANK') {
+      methodHint = 'BANK';
+    } else if (id.includes('orange')) {
+      methodHint = 'ORANGE';
+    } else {
+      methodHint = 'MOMO'; // MTN, Airtel, M-Pesa, Vodacom, Tigo, AzamPesa, HaloPesa …
+    }
+    this.logger.log(`  providerCode : ${providerCode}`);
+    this.logger.log(`  methodHint   : ${methodHint}  (passed as metadata.method)`);
+    this.logger.log(`  preferredCode: ${providerCode}  (forces exact provider selection)`);
+
+    // ── 3. Build reference + DTO ─────────────────────────────────────────────
+    this.logger.log(sep);
+    this.logger.log('📦  STEP 3 — Build PayinDto / PayoutDto');
+    const reference = `ADMINTEST${Date.now()}`;
+    const dto = {
+      amount,
+      currency,
+      phone,
+      reference,
+      description: `Admin test — ${paymentType} via ${providerCode}`,
+      metadata: {
+        country,
+        method:       methodHint,   // drives mapMethod + getProviderFromDb hint
+        providerCode,               // preferred provider — bypasses priority selection
+      },
+    };
+    this.logger.log(`  reference   : ${reference}`);
+    this.logger.log(`  amount      : ${amount} ${currency}`);
+    this.logger.log(`  phone       : ${phone}`);
+    this.logger.log(`  metadata    : ${JSON.stringify(dto.metadata)}`);
+
+    // ── 4. Delegate to the shared NetwalletpayProvider ────────────────────────
+    // This uses the identical token, phone-formatting, hash, MethodType, and
+    // retry logic as a real payment — no separate HTTP stack.
+    this.logger.log(sep);
+    this.logger.log(`🚀  STEP 4 — Calling NetwalletpayProvider.${paymentType === 'COLLECTION' ? 'payin' : 'payout'}()`);
+    this.logger.log(`  (phone formatting, hash, MethodType, retries all handled internally)`);
+
+    let result: { status: string; transactionId?: string; error?: string; provider?: string };
+    if (paymentType === 'COLLECTION') {
+      result = await this.netwalletpay.payin(dto);
+    } else {
+      if (paymentType === 'PAYOUT') this.logger.warn('  ⚠️  PAYOUT — real funds will be transferred');
+      result = await this.netwalletpay.payout(dto);
+    }
+
+    // ── 5. Log result ─────────────────────────────────────────────────────────
+    this.logger.log(sep);
+    this.logger.log('📊  STEP 5 — Result');
+    this.logger.log(`  status         : ${result.status}`);
+    this.logger.log(`  transactionId  : ${result.transactionId ?? '(none)'}`);
+    if (result.error) this.logger.log(`  error          : ${result.error}`);
+    if (result.provider) this.logger.log(`  providerUsed   : ${result.provider}`);
+
+    const ok = result.status === 'SUCCESS';
+    if (ok) {
+      this.logger.log(sep2);
+      this.logger.log(`✅  TEST PASSED  —  ${paymentType}  |  ${providerCode}  |  ${amount} ${currency}`);
+      this.logger.log(sep2);
+    } else {
+      this.logger.error(sep2);
+      this.logger.error(`❌  TEST FAILED  —  ${paymentType}  |  ${providerCode}  |  ${result.error ?? 'unknown error'}`);
+      this.logger.error(sep2);
+    }
+
+    // ── 6. Audit log ──────────────────────────────────────────────────────────
+    await this.log(adminId, `PROVIDER_TX_TEST_${paymentType}`, 'SYSTEM', providerCode, {
+      country, phone, amount, currency, ok,
+      transactionId: result.transactionId ?? null,
+      error: result.error ?? null,
+    }, ip);
+
+    return {
+      ok,
+      paymentType,
+      country,
+      providerCode,
+      providerName:  provider.name,
+      currency,
+      amount,
+      phone,
+      orderId:       reference,
+      transactionId: result.transactionId ?? null,
+      message:       ok ? 'Transaction accepted' : (result.error ?? 'Transaction failed'),
+      raw:           result,
     };
   }
 

@@ -173,7 +173,7 @@ export class AdminController {
 
   @Post('providers/test')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Live-test a country/method against the Netwalletpay API — shows what they have vs our DB' })
+  @ApiOperation({ summary: 'Query Netwalletpay API for providers — shows what they have vs our DB' })
   testProvider(
     @Body('country')     country: string,
     @Body('method')      method: string,
@@ -183,6 +183,30 @@ export class AdminController {
       throw new BadRequestException('country, method and paymentType are required');
     }
     return this.admin.testProvider(country.toUpperCase(), method.toUpperCase(), paymentType.toUpperCase() as 'COLLECTION' | 'PAYOUT');
+  }
+
+  @Post('providers/test-transaction')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Fire a real COLLECTION or PAYOUT request at Netwalletpay to verify a provider is live' })
+  testTransaction(
+    @Req() req: AuthenticatedRequest,
+    @Body('country')     country: string,
+    @Body('providerCode') providerCode: string,
+    @Body('paymentType') paymentType: string,
+    @Body('phone')       phone: string,
+    @Body('amount')      amount: number,
+  ) {
+    if (!country || !providerCode || !paymentType || !phone || !amount) {
+      throw new BadRequestException('country, providerCode, paymentType, phone and amount are required');
+    }
+    return this.admin.testTransaction({
+      country: country.toUpperCase(),
+      providerCode,
+      paymentType: paymentType.toUpperCase() as 'COLLECTION' | 'PAYOUT',
+      phone,
+      amount: Number(amount),
+      adminId: req.user.userId,
+    }, req.ip);
   }
 
   // ── Pricing (admin-audited) ───────────────────────────────────────────────

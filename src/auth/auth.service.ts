@@ -575,4 +575,28 @@ export class AuthService {
 
     return { message: 'Logged out successfully' };
   }
+
+  /** One-time admin bootstrap — secured by ADMIN_BOOTSTRAP_TOKEN env var. */
+  async bootstrapAdmin(email: string, bootstrapToken: string) {
+    const expectedToken = process.env.ADMIN_BOOTSTRAP_TOKEN;
+    if (!expectedToken || bootstrapToken !== expectedToken) {
+      throw new UnauthorizedException('Invalid bootstrap token');
+    }
+
+    const contact = await this.prisma.userContact.findFirst({
+      where: { value: email, type: 'EMAIL' },
+    });
+    if (!contact) {
+      throw new BadRequestException('No verified email account found for that address');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: contact.userId },
+      data: { role: 'ADMIN' },
+      select: { id: true, firstName: true, lastName: true, role: true },
+    });
+
+    this.logger.warn(`🛡️ Admin bootstrapped: ${updated.firstName} ${updated.lastName} (${email})`);
+    return updated;
+  }
 }

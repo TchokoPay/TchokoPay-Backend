@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { PaymentProvider } from './base/payment-provider.interface.js';
 import { PayinDto, PayoutDto } from './base/types.js';
+import { detectProviderFromPhone } from './mno-detect.js';
 
 export type NetwalletpayMethod =
   | 'MOBILE_MONEY'
@@ -142,6 +143,23 @@ export class NetwalletpayProvider implements PaymentProvider {
     return (reference || '').trim().replace(/^(INV|REQ)-/i, '');
   }
 
+  /**
+   * Mobile money and bank APIs (Airtel, MTN, M-Pesa, bank transfers) only
+   * accept integer amounts. Crypto methods keep full decimal precision.
+   * Uses Math.ceil for payin (payer always covers the full amount) and
+   * Math.round for payout (neutral rounding, avoid systematic overpayment).
+   */
+  private normalizeAmount(
+    amount: number,
+    method: NetwalletpayMethod,
+    direction: 'payin' | 'payout',
+  ): number {
+    if (method === 'CRYPTO') return Number(amount);
+    return direction === 'payin'
+      ? Math.ceil(Number(amount))
+      : Math.round(Number(amount));
+  }
+
   async payin(data: PayinDto): Promise<any> {
     const { amount, currency, reference, phone, metadata } = data;
 
@@ -153,18 +171,33 @@ export class NetwalletpayProvider implements PaymentProvider {
     this.logger.log(`🔄 Netwalletpay PAYIN: ${method} in ${country} - ${amount} ${currency} to ${phone}`);
 
     try {
+      // Format phone first so we can auto-detect the correct MNO from the prefix.
+      const formattedPhone = phone ? await this.formatPhoneNumber(phone, country) : phone;
+
+      // Provider resolution priority:
+      //   1. Explicit code from the frontend (user's provider selection) — always trust this.
+      //   2. Auto-detect from phone prefix — only when frontend sent no selection.
+      //   3. DB default for this country/method — final fallback.
+      const explicitProvider = metadata?.providerCode as string | undefined;
+      const detectedProvider = explicitProvider
+        ? null  // skip auto-detect when user made an explicit selection
+        : (formattedPhone ? detectProviderFromPhone(formattedPhone, country) : null);
+
+      const resolvedProvider = explicitProvider ?? detectedProvider ?? undefined;
+      this.logger.log(
+        `🔍 Provider resolved: ${resolvedProvider ?? 'DB default'} ` +
+        `[explicit=${explicitProvider ?? '-'} detected=${detectedProvider ?? '-'}]`,
+      );
+
       const providerInfo = await this.getProviderInfo(
         'COLLECTION',
         method,
         country,
         rawPaymentMethod,
-        metadata?.providerCode as string | undefined,
+        resolvedProvider,
       );
       const providerId = providerInfo.id;
       const methodType = providerInfo.methodType || this.getMethodType(country, method, providerId);
-
-      // Format phone number with country code
-      const formattedPhone = phone ? await this.formatPhoneNumber(phone, country) : phone;
 
       this.logger.log(`📌 PAYIN Configuration:`, {
         country,
@@ -184,7 +217,7 @@ export class NetwalletpayProvider implements PaymentProvider {
       const payload: any = {
         CurrencyCode: currency,
         OrderID: orderId,
-        Amount: Number(amount),
+        Amount: this.normalizeAmount(amount, method, 'payin'),
         Method: method,
         CountryCode: country,
         MethodProvider: providerId,
@@ -257,20 +290,33 @@ export class NetwalletpayProvider implements PaymentProvider {
     );
 
     try {
-      // Pass the raw payout method as a hint so provider selection picks the correct
-      // network (e.g. orange_cm for ORANGE, mtn_cm for MOMO).
+      // Format phone first so we can auto-detect the correct MNO from the prefix.
+      const formattedPhone = phone ? await this.formatPhoneNumber(phone, country) : phone;
+
+      // Provider resolution priority (same as payin):
+      //   1. Explicit code from frontend (user's selection) — trust this first.
+      //   2. Auto-detect from recipient's phone prefix — only when no explicit code.
+      //   3. DB default for this country/method — final fallback.
+      const explicitProvider = metadata?.providerCode as string | undefined;
+      const detectedProvider = explicitProvider
+        ? null
+        : (formattedPhone ? detectProviderFromPhone(formattedPhone, country) : null);
+
+      const resolvedProvider = explicitProvider ?? detectedProvider ?? undefined;
+      this.logger.log(
+        `🔍 Payout provider resolved: ${resolvedProvider ?? 'DB default'} ` +
+        `[explicit=${explicitProvider ?? '-'} detected=${detectedProvider ?? '-'}]`,
+      );
+
       const providerInfo = await this.getProviderInfo(
         'PAYOUT',
         method,
         country,
         rawPayoutMethod,
-        metadata?.providerCode as string | undefined,
+        resolvedProvider,
       );
       const providerId = providerInfo?.methodProviderId || providerInfo?.id || 'mtn_cm';
       const methodType = this.getMethodType(country, method, providerInfo?.id);
-      
-      // Format phone number with country code
-      const formattedPhone = phone ? await this.formatPhoneNumber(phone, country) : phone;
 
       this.logger.log(`📌 PAYOUT Configuration:`, {
         country,
@@ -290,7 +336,7 @@ export class NetwalletpayProvider implements PaymentProvider {
       const payload: any = {
         CurrencyCode: currency,
         OrderID: orderId,
-        Amount: Number(amount),
+        Amount: this.normalizeAmount(amount, method, 'payout'),
         Method: method,
         CountryCode: country,
         MethodProvider: providerId,
@@ -819,37 +865,44 @@ export class NetwalletpayProvider implements PaymentProvider {
   }
 
   /**
-   * Format phone number for API (ensure international format with country code)
+   * Format phone number for Netwalletpay API.
+   * Result: plain digits with country code prefix, no + sign. e.g. "237670000000"
+   *
+   * Strategy: always extract the pure local part first, then recompose.
+   * This prevents any double-country-code issue regardless of how the frontend
+   * composed the number.
    */
   private async formatPhoneNumber(phone: string, country: NetwalletpayCountry): Promise<string> {
     if (!phone) return phone;
 
-    // Strip +, spaces, dashes, parentheses
-    let cleanPhone = phone.replace(/[\s+\-\(\)]/g, '');
+    const dialCode     = await this.getCountryDialCode(country);
+    const cc           = dialCode.replace('+', ''); // e.g. "237"
 
-    const dialCode = await this.getCountryDialCode(country);
-    const countryDigits = dialCode.replace('+', ''); // e.g. "237" for Cameroon
+    // 1. Strip all formatting characters (keep digits only)
+    let digits = phone.replace(/[\s+\-\(\)]/g, '');
 
-    // Already has country code prefix — return as-is (no + sign: API expects "237XXXXXXXXX")
-    if (cleanPhone.startsWith(countryDigits)) {
-      this.logger.log(`📱 Phone formatting: ${phone} → ${cleanPhone} (country: ${country})`);
-      return cleanPhone;
+    // 2. Strip international dialling prefix 00 → remaining starts with country code
+    if (digits.startsWith('00')) {
+      digits = digits.substring(2);
     }
 
-    // International dialing prefix 00 → strip it, the remaining should already include country code
-    if (cleanPhone.startsWith('00')) {
-      const formatted = cleanPhone.substring(2);
-      this.logger.log(`📱 Phone formatting: ${phone} → ${formatted} (country: ${country})`);
-      return formatted;
+    // 3. Strip country code prefix → leaves pure local digits
+    if (digits.startsWith(cc)) {
+      digits = digits.substring(cc.length);
     }
 
-    // Local number — strip leading 0 if present, then prepend country digits (no + sign)
-    if (cleanPhone.startsWith('0')) {
-      cleanPhone = cleanPhone.substring(1);
+    // 4. Strip any spurious leading zero (local-format habit)
+    if (digits.startsWith('0')) {
+      digits = digits.substring(1);
     }
 
-    const formatted = countryDigits + cleanPhone;
-    this.logger.log(`📱 Phone formatting: ${phone} → ${formatted} (country: ${country})`);
+    // 5. Recompose: countryCode + localDigits  (API expects no + sign)
+    const formatted = cc + digits;
+
+    this.logger.log(
+      `📱 Phone formatting: ${phone} → ${formatted}` +
+      `  [cc=${cc} local=${digits} country=${country}]`,
+    );
     return formatted;
   }
 

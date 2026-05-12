@@ -145,7 +145,9 @@ export class ProcessPaymentUseCase {
     let recipientPhone: string | null = null;
     let recipientName: string = 'External User';
     let payoutMethod: string = (dto.payoutMethod || quote.payoutMethod).toUpperCase();
-    let payoutProviderCode: string | null = null;
+    // Use the provider codes from the frontend (user's explicit selection).
+    // These override auto-detection in the Netwalletpay provider.
+    let payoutProviderCode: string | null = dto.payoutProviderCode ?? null;
     let recipientCountry: string | null = null;
 
     if (dto.flow === FlowType.DIRECT) {
@@ -281,6 +283,7 @@ export class ProcessPaymentUseCase {
             country: payerCountry,
             method: paymentMethod,
             type: 'COLLECTION',
+            providerCode: dto.paymentProviderCode ?? undefined,
           },
         });
       } else {
@@ -294,6 +297,7 @@ export class ProcessPaymentUseCase {
             country: payerCountry,
             method: paymentMethod,
             type: 'COLLECTION',
+            providerCode: dto.paymentProviderCode ?? undefined,
           },
         });
       }

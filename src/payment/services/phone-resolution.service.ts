@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { UserSettingsService } from '../../users/services/user-settings.service.js';
 
@@ -97,43 +97,25 @@ export class PhoneResolutionService {
     throw new BadRequestException(`Unsupported payout method: ${payoutMethod}`);
   }
 
-  /**
-   * Private helper for mobile money resolution
-   */
   private async resolveMobileMoneyPayer(
     userId: string,
     optionalPayerPhone: string | undefined,
     method: string,
   ): Promise<PhoneResolutionResult> {
-    // Try to get verified phone for registered user
-    const verifiedContact = await this.prisma.userContact.findFirst({
-      where: {
-        userId,
-        type: 'PHONE',
-        isVerified: true,
-      },
-      include: { user: true },
-    });
-
-    if (verifiedContact) {
-      return {
-        payerPhone: verifiedContact.value,
-        payerName: `${verifiedContact.user.firstName} ${verifiedContact.user.lastName}`,
-        requiresPhone: true,
-        method,
-      };
-    }
-
-    // No verified contact - check if user provided one
     if (!optionalPayerPhone) {
       throw new BadRequestException(
-        `${method} payment requires a verified phone number. Please provide payerPhone or verify your phone number in settings.`,
+        `${method} payment requires a phone number. Enter your mobile money number in the payment form.`,
       );
     }
 
-    // Use provided phone (unregistered user or guest)
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true },
+    });
+
     return {
       payerPhone: optionalPayerPhone,
+      payerName: user ? `${user.firstName} ${user.lastName}` : undefined,
       requiresPhone: true,
       method,
     };

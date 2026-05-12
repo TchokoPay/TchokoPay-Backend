@@ -17,7 +17,6 @@ import {
 } from '@nestjs/swagger';
 
 import { AuthService } from './auth.service.js';
-import { AdminService } from '../admin/admin.service.js';
 
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
@@ -59,10 +58,7 @@ function refreshCookieOptions(): CookieOptions {
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(
-    private authService: AuthService,
-    private adminService: AdminService,
-  ) {}
+  constructor(private authService: AuthService) {}
 
   @Public()
   @Get('google/config')
@@ -252,7 +248,7 @@ export class AuthController {
     @Body('email') email: string,
     @Body('bootstrapToken') bootstrapToken: string,
   ) {
-    return this.adminService.bootstrapAdmin(email, bootstrapToken);
+    return this.authService.bootstrapAdmin(email, bootstrapToken);
   }
 
   // =========================
