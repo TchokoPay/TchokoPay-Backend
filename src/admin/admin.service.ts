@@ -574,6 +574,135 @@ export class AdminService {
     return updated;
   }
 
+  // ── Country & Provider Management ────────────────────────────────────────
+
+  async listCountriesWithProviders() {
+    return this.prisma.country.findMany({
+      include: {
+        currency: { select: { code: true, symbol: true } },
+        providers: {
+          where: { aggregator: { code: 'netwalletpay' } },
+          include: { method: { select: { code: true, name: true } } },
+          orderBy: { providerCode: 'asc' },
+        },
+      },
+      orderBy: { iso2: 'asc' },
+    });
+  }
+
+  async toggleCountry(adminId: string, iso2: string, ip?: string) {
+    const country = await this.prisma.country.findUnique({ where: { iso2 } });
+    if (!country) throw new NotFoundException('Country not found');
+    const updated = await this.prisma.country.update({
+      where: { iso2 },
+      data: { isActive: !country.isActive },
+      include: { currency: { select: { code: true } } },
+    });
+    await this.log(adminId, country.isActive ? 'COUNTRY_DISABLED' : 'COUNTRY_ENABLED', 'SYSTEM', iso2, { name: country.name }, ip);
+    return updated;
+  }
+
+  async toggleProvider(adminId: string, providerCode: string, ip?: string) {
+    const provider = await this.prisma.paymentProvider.findUnique({
+      where: { providerCode },
+      include: { country: true, method: true },
+    });
+    if (!provider) throw new NotFoundException('Provider not found');
+    const updated = await this.prisma.paymentProvider.update({
+      where: { providerCode },
+      data: { isActive: !provider.isActive },
+      include: { country: true, method: true },
+    });
+    await this.log(adminId, provider.isActive ? 'PROVIDER_DISABLED' : 'PROVIDER_ENABLED', 'SYSTEM', providerCode, { name: provider.name, country: provider.country.iso2 }, ip);
+    return updated;
+  }
+
+  /** Calls Netwalletpay live API to check what providers they have for a given country/method.
+   *  Returns a diff: what Netwalletpay has vs what our DB has. */
+  async testProvider(country: string, method: string, paymentType: 'COLLECTION' | 'PAYOUT') {
+    const primaryKey = this.config.get<string>('NETWALLETPAY_PRIMARY_KEY', '');
+    const email      = this.config.get<string>('NETWALLETPAY_EMAIL', '');
+    const baseUrl    = (this.config.get<string>('NETWALLETPAY_BASE_URL', 'https://netwalletpay.com') || '').replace(/\/+$/, '');
+
+    if (!primaryKey || !email) {
+      throw new BadRequestException('Netwalletpay credentials not configured in environment');
+    }
+
+    // ── 1. Fetch access token ────────────────────────────────────────────────
+    const form = new URLSearchParams();
+    form.append('primary_key', primaryKey);
+    form.append('email', email);
+    form.append('grant_type', 'primary_key');
+
+    const tokenRes = await fetch(`${baseUrl}/api/v1/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    });
+
+    if (!tokenRes.ok) {
+      const body = await tokenRes.text();
+      throw new BadRequestException(`Netwalletpay auth failed (${tokenRes.status}): ${body}`);
+    }
+    const tokenData = (await tokenRes.json()) as { access_token: string };
+    const token = tokenData.access_token;
+
+    // ── 2. Call provider lookup ───────────────────────────────────────────────
+    const endpoint = `/api/v1/lookup/get-providers/${paymentType}/${method}/${country}`;
+    const lookupRes = await fetch(`${baseUrl}${endpoint}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    });
+
+    let netwalletpayProviders: Array<{ id: string; name: string; transactionCurrency?: string }> = [];
+    let rawResponse: unknown = null;
+
+    if (lookupRes.ok) {
+      rawResponse = await lookupRes.json();
+      netwalletpayProviders = (rawResponse as any)?.data ?? [];
+    } else {
+      rawResponse = { error: await lookupRes.text(), status: lookupRes.status };
+    }
+
+    // ── 3. Compare with our DB ────────────────────────────────────────────────
+    const dbProviders = await this.prisma.paymentProvider.findMany({
+      where: {
+        country: { iso2: country },
+        method: { code: method },
+        aggregator: { code: 'netwalletpay' },
+      },
+      orderBy: { providerCode: 'asc' },
+    });
+
+    const nwCodes = new Set(netwalletpayProviders.map((p) => p.id));
+    const dbCodes = new Set(dbProviders.map((p) => p.providerCode));
+
+    return {
+      country,
+      method,
+      paymentType,
+      endpoint: `${baseUrl}${endpoint}`,
+      netwalletpay: {
+        count: netwalletpayProviders.length,
+        providers: netwalletpayProviders,
+        raw: rawResponse,
+      },
+      database: {
+        count: dbProviders.length,
+        providers: dbProviders.map((p) => ({
+          providerCode: p.providerCode,
+          name:         p.name,
+          isActive:     p.isActive,
+          requiresType: p.requiresType,
+          inNetwalletpay: nwCodes.has(p.providerCode),
+        })),
+      },
+      diff: {
+        onlyInNetwalletpay: netwalletpayProviders.filter((p) => !dbCodes.has(p.id)).map((p) => p.id),
+        onlyInDatabase:     dbProviders.filter((p) => !nwCodes.has(p.providerCode)).map((p) => p.providerCode),
+      },
+    };
+  }
+
   // ── Bootstrap (create first admin) ───────────────────────────────────────
 
   async bootstrapAdmin(email: string, bootstrapToken: string) {

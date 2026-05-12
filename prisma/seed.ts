@@ -14,31 +14,19 @@ const aggregators = [
 ];
 
 /**
- * Countries confirmed in the NetwalletpayCountry type in netwalletpay.provider.ts.
- * Source of truth: | 'UG' | 'KE' | 'TZ' | 'RW' | 'BI' | 'GH' | 'CM' | 'ZA' | 'NG' | 'ZM'
+ * Active countries — only those with at least one REAL named provider
+ * (not just netwallet_xx fallback). Verified 2026-05-12.
  *
- * DO NOT add a country here unless it appears in that type — adding unconfirmed
- * countries will surface to users but fail silently when Netwalletpay returns
- * 0 providers for that country code.
+ * Excluded (only had netwallet_xx, which is now deactivated):
+ *   RW, BI, GH, ZM, EG
  */
 const countries = [
-  // ── Central Africa ────────────────────────────────────────────────
-  { iso2: 'CM', name: 'Cameroon',      currency: 'XAF', dialCode: '+237' },
-
-  // ── East Africa ───────────────────────────────────────────────────
-  { iso2: 'KE', name: 'Kenya',         currency: 'KES', dialCode: '+254' },
-  { iso2: 'TZ', name: 'Tanzania',      currency: 'TZS', dialCode: '+255' },
-  { iso2: 'UG', name: 'Uganda',        currency: 'UGX', dialCode: '+256' },
-  { iso2: 'RW', name: 'Rwanda',        currency: 'RWF', dialCode: '+250' },
-  { iso2: 'BI', name: 'Burundi',       currency: 'BIF', dialCode: '+257' },
-
-  // ── West Africa ───────────────────────────────────────────────────
-  { iso2: 'GH', name: 'Ghana',         currency: 'GHS', dialCode: '+233' },
-  { iso2: 'NG', name: 'Nigeria',       currency: 'NGN', dialCode: '+234' },
-
-  // ── Southern Africa ───────────────────────────────────────────────
-  { iso2: 'ZA', name: 'South Africa',  currency: 'ZAR', dialCode: '+27'  },
-  { iso2: 'ZM', name: 'Zambia',        currency: 'ZMW', dialCode: '+260' },
+  { iso2: 'CM', name: 'Cameroon',     currency: 'XAF', dialCode: '+237' },
+  { iso2: 'KE', name: 'Kenya',        currency: 'KES', dialCode: '+254' },
+  { iso2: 'TZ', name: 'Tanzania',     currency: 'TZS', dialCode: '+255' },
+  { iso2: 'UG', name: 'Uganda',       currency: 'UGX', dialCode: '+256' },
+  { iso2: 'NG', name: 'Nigeria',      currency: 'NGN', dialCode: '+234' },
+  { iso2: 'ZA', name: 'South Africa', currency: 'ZAR', dialCode: '+27'  },
 ];
 
 const methods = [
@@ -50,65 +38,50 @@ const methods = [
 ];
 
 /**
- * Provider codes from GET /api/v1/lookup/get-providers/{type}/{method}/{country}.
+ * VERIFIED provider codes — sourced by live API calls on 2026-05-12:
+ *   GET /api/v1/lookup/get-providers/COLLECTION/MOBILE_MONEY/{COUNTRY}
+ *   GET /api/v1/lookup/get-providers/PAYOUT/MOBILE_MONEY/{COUNTRY}
  *
- * requiresType = true → MethodType field is required in Netwalletpay API calls.
- * For CM MOBILE_MONEY: valid MethodType values are MOMO (MTN), ORANGE_MONEY (Orange), EU.
+ * Every provider listed here was returned by Netwalletpay's own API.
+ * Provider codes that were NOT returned have been removed (mtn_rw, airtel_rw,
+ * econet_bi, lumicash_bi, mtn_gh, vodafone_gh, airtel_gh, mtn_zm, airtel_zm,
+ * zamtel_zm, fnb_za, standard_za, absa_za, card_ng — none existed on API).
  *
- * Only add providers you have verified through verifyProviderConfig() or the live
- * lookup endpoint — these codes are sent directly in the MethodProvider field.
+ * requiresType = true → MethodType field needed (CM only per Netwalletpay docs).
+ * MethodType values: MOMO (mtn_cm), ORANGE_MONEY (orange_cm), EU (eu_cm), MOMO (netwallet_cm default)
  */
 const providers = [
-  // ── Cameroon (CM) ─────────────────────────────────────────────────
-  // MethodType required; mtn_cm → MOMO, orange_cm → ORANGE_MONEY
-  { providerCode: 'mtn_cm',       name: 'MTN Mobile Money',  country: 'CM', method: 'MOBILE_MONEY',  requiresType: true  },
-  { providerCode: 'orange_cm',    name: 'Orange Money',       country: 'CM', method: 'MOBILE_MONEY',  requiresType: true  },
-  { providerCode: 'netwallet_cm', name: 'Netwallet Pay',      country: 'CM', method: 'NETWALLET_PAY', requiresType: false },
+  // ── Cameroon (CM) — MTN + Orange only (eu_cm and netwallet_cm deactivated) ─
+  { providerCode: 'mtn_cm',    name: 'MTN MoMo',     country: 'CM', method: 'MOBILE_MONEY', requiresType: true  },
+  { providerCode: 'orange_cm', name: 'Orange Money', country: 'CM', method: 'MOBILE_MONEY', requiresType: true  },
 
-  // ── Kenya (KE) ────────────────────────────────────────────────────
+  // ── Kenya (KE) — M-Pesa + Airtel (netwallet_ke deactivated) ───────────────
   { providerCode: 'mpesa_ke',  name: 'M-Pesa',       country: 'KE', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'airtel_ke', name: 'Airtel Money',  country: 'KE', method: 'MOBILE_MONEY', requiresType: false },
+  { providerCode: 'airtel_ke', name: 'Airtel Money', country: 'KE', method: 'MOBILE_MONEY', requiresType: false },
 
-  // ── Tanzania (TZ) ─────────────────────────────────────────────────
-  { providerCode: 'vodacom_tz', name: 'Vodacom M-Pesa', country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'airtel_tz',  name: 'Airtel Money',   country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'tigo_tz',    name: 'Tigo Pesa',      country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
+  // ── Tanzania (TZ) — 5 named providers (netwallet_tz deactivated) ──────────
+  { providerCode: 'vodacom_tz',  name: 'Vodacom M-Pesa', country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
+  { providerCode: 'airtel_tz',   name: 'Airtel Money',   country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
+  { providerCode: 'tigo_tz',     name: 'Tigo Pesa',      country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
+  { providerCode: 'azampesa_tz', name: 'AzamPesa',       country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
+  { providerCode: 'halopesa_tz', name: 'HaloPesa',       country: 'TZ', method: 'MOBILE_MONEY', requiresType: false },
 
-  // ── Uganda (UG) ───────────────────────────────────────────────────
-  { providerCode: 'mtn_ug',    name: 'MTN Mobile Money', country: 'UG', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'airtel_ug', name: 'Airtel Money',     country: 'UG', method: 'MOBILE_MONEY', requiresType: false },
+  // ── Uganda (UG) — MTN + Airtel (netwallet_ug deactivated) ────────────────
+  { providerCode: 'mtn_ug',    name: 'MTN MoMo',     country: 'UG', method: 'MOBILE_MONEY', requiresType: false },
+  { providerCode: 'airtel_ug', name: 'Airtel Money', country: 'UG', method: 'MOBILE_MONEY', requiresType: false },
 
-  // ── Rwanda (RW) ───────────────────────────────────────────────────
-  { providerCode: 'mtn_rw',    name: 'MTN Mobile Money', country: 'RW', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'airtel_rw', name: 'Airtel Money',     country: 'RW', method: 'MOBILE_MONEY', requiresType: false },
+  // ── Nigeria (NG) — bank transfer only (netwallet_ng deactivated) ──────────
+  { providerCode: 'bank_ng', name: 'Bank Transfer', country: 'NG', method: 'BANK', requiresType: false },
 
-  // ── Burundi (BI) ──────────────────────────────────────────────────
-  { providerCode: 'econet_bi',   name: 'Econet Leo', country: 'BI', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'lumicash_bi', name: 'Lumicash',   country: 'BI', method: 'MOBILE_MONEY', requiresType: false },
+  // ── South Africa (ZA) — bank transfer only (netwallet_za deactivated) ─────
+  { providerCode: 'bank_za', name: 'Bank Transfer', country: 'ZA', method: 'BANK', requiresType: false },
 
-  // ── Ghana (GH) ────────────────────────────────────────────────────
-  { providerCode: 'mtn_gh',      name: 'MTN Mobile Money',  country: 'GH', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'vodafone_gh', name: 'Vodafone Cash',     country: 'GH', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'airtel_gh',   name: 'AirtelTigo Money',  country: 'GH', method: 'MOBILE_MONEY', requiresType: false },
-
-  // ── Nigeria (NG) — card collection only ───────────────────────────
-  // Netwalletpay only confirms card for NG (no mobile money).
-  // Do NOT add mtn_ng / airtel_ng until confirmed via verifyProviderConfig().
-  { providerCode: 'card_ng', name: 'Card Payment', country: 'NG', method: 'CARD', requiresType: false },
-
-  // ── South Africa (ZA) — bank collection + payout ──────────────────
-  { providerCode: 'fnb_za',      name: 'FNB',           country: 'ZA', method: 'BANK', requiresType: false },
-  { providerCode: 'standard_za', name: 'Standard Bank', country: 'ZA', method: 'BANK', requiresType: false },
-  { providerCode: 'absa_za',     name: 'ABSA',          country: 'ZA', method: 'BANK', requiresType: false },
-
-  // ── Zambia (ZM) ───────────────────────────────────────────────────
-  { providerCode: 'mtn_zm',    name: 'MTN Mobile Money', country: 'ZM', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'airtel_zm', name: 'Airtel Money',     country: 'ZM', method: 'MOBILE_MONEY', requiresType: false },
-  { providerCode: 'zamtel_zm', name: 'Zamtel Money',     country: 'ZM', method: 'MOBILE_MONEY', requiresType: false },
+  // RW, BI, GH, ZM, EG had ONLY netwallet_xx — those countries are now excluded
+  // (soft-deactivated via the countries notIn filter above).
 ];
 
 async function main() {
-  console.log('🌱 Seeding aggregators, countries, methods, and providers...');
+  console.log('🌱 Seeding (verified against live Netwalletpay API)...');
 
   // 0. Upsert aggregators
   const aggregatorRecords = await Promise.all(
@@ -122,9 +95,9 @@ async function main() {
   );
   const aggregatorMap = Object.fromEntries(aggregatorRecords.map((a) => [a.code, a.id]));
   const netwalletpayId = aggregatorMap['netwalletpay'];
-  console.log(`  ✔ ${aggregators.length} aggregators upserted`);
+  console.log(`  ✔ ${aggregators.length} aggregators`);
 
-  // 1. Upsert currencies + countries
+  // 1. Upsert currencies + countries; soft-deactivate removed ones
   await Promise.all(
     countries.map(async ({ iso2, name, currency, dialCode }) => {
       const cur = await prisma.currency.upsert({
@@ -139,15 +112,13 @@ async function main() {
       });
     }),
   );
-
-  // Soft-deactivate countries that are no longer confirmed (SN, CI, GQ, MY, etc.)
   await prisma.country.updateMany({
     where: { iso2: { notIn: countries.map((c) => c.iso2) } },
     data: { isActive: false },
   });
-  console.log(`  ✔ ${countries.length} countries upserted (removed countries soft-deactivated)`);
+  console.log(`  ✔ ${countries.length} countries (unlisted soft-deactivated)`);
 
-  // 2. Upsert payment method categories
+  // 2. Payment method categories
   await Promise.all(
     methods.map((m) =>
       prisma.paymentMethodRef.upsert({
@@ -157,19 +128,18 @@ async function main() {
       }),
     ),
   );
-  console.log(`  ✔ ${methods.length} payment methods upserted`);
+  console.log(`  ✔ ${methods.length} payment method refs`);
 
-  // 3. Upsert Netwalletpay providers
-  let seeded = 0, skipped = 0;
+  // 3. Upsert verified providers; soft-deactivate removed ones
   const validCodes = providers.map((p) => p.providerCode);
+  let seeded = 0;
 
   await Promise.all(
     providers.map(async ({ providerCode, name, country, method, requiresType }) => {
       const countryRec = await prisma.country.findUnique({ where: { iso2: country } });
       const methodRec  = await prisma.paymentMethodRef.findUnique({ where: { code: method } });
       if (!countryRec || !methodRec) {
-        console.warn(`  ⚠  Skipping ${providerCode}: country/method not found`);
-        skipped++;
+        console.warn(`  ⚠  Skip ${providerCode}: country/method not found`);
         return;
       }
       await prisma.paymentProvider.upsert({
@@ -181,17 +151,13 @@ async function main() {
     }),
   );
 
-  // Soft-deactivate providers that were removed (SN/CI/GQ providers, speculative NG/ZA extras)
+  // Deactivate any provider that is no longer in the verified list
   await prisma.paymentProvider.updateMany({
-    where: {
-      aggregator: { code: 'netwalletpay' },
-      providerCode: { notIn: validCodes },
-    },
+    where: { aggregator: { code: 'netwalletpay' }, providerCode: { notIn: validCodes } },
     data: { isActive: false },
   });
-
-  console.log(`  ✔ ${seeded} providers seeded (${skipped} skipped, extras soft-deactivated)`);
-  console.log('\n✅ Seed complete.');
+  console.log(`  ✔ ${seeded} providers seeded (non-listed soft-deactivated)`);
+  console.log('\n✅ Seed complete — matches live Netwalletpay API.');
 }
 
 main()

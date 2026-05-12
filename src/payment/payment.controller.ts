@@ -346,6 +346,16 @@ export class PaymentController {
   }
 
   // ============================
+  // ACTIVE COUNTRIES (Public — read by payment creation wizard)
+  // ============================
+  @Public()
+  @Get('active-countries')
+  @ApiOperation({ summary: 'Active countries + providers for the payment wizard (no auth required)' })
+  getActiveCountries() {
+    return this.service.getActiveCountries();
+  }
+
+  // ============================
   // PUBLIC INVOICE LOOKUP (for /pay/[reference] page — no auth required)
   // ============================
   @Public()

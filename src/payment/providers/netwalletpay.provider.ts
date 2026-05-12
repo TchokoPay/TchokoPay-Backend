@@ -12,9 +12,10 @@ export type NetwalletpayMethod =
   | 'NETWALLET_PAY'
   | 'CRYPTO';
 
+// Verified 2026-05-12 via GET /api/v1/lookup/get-providers/COLLECTION/MOBILE_MONEY/{country}
 export type NetwalletpayCountry =
-  | 'UG' | 'KE' | 'TZ' | 'RW' | 'BI' | 'GH' | 'CM' | 'EG'
-  | 'ZA' | 'NG' | 'ZM' | 'US' | 'GB' | 'EU';
+  | 'CM' | 'KE' | 'TZ' | 'UG' | 'RW' | 'BI' | 'GH'
+  | 'NG' | 'ZA' | 'ZM' | 'EG';
 
 interface NetwalletpayConfig {
   primaryKey: string;

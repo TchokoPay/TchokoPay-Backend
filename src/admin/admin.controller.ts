@@ -13,6 +13,7 @@ import {
   DefaultValuePipe,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AdminService } from './admin.service.js';
@@ -148,6 +149,40 @@ export class AdminController {
     @Body('reason') reason?: string,
   ) {
     return this.admin.reviewKyc(req.user.userId, kycId, decision, reason, req.ip);
+  }
+
+  // ── Country & Provider Management ────────────────────────────────────────
+
+  @Get('countries')
+  @ApiOperation({ summary: 'All countries with their Netwalletpay providers (active + inactive)' })
+  listCountries() {
+    return this.admin.listCountriesWithProviders();
+  }
+
+  @Patch('countries/:iso2/toggle')
+  @ApiOperation({ summary: 'Enable or disable a country (removes it from payment wizard)' })
+  toggleCountry(@Req() req: AuthenticatedRequest, @Param('iso2') iso2: string) {
+    return this.admin.toggleCountry(req.user.userId, iso2.toUpperCase(), req.ip);
+  }
+
+  @Patch('providers/:code/toggle')
+  @ApiOperation({ summary: 'Enable or disable a single payment provider' })
+  toggleProvider(@Req() req: AuthenticatedRequest, @Param('code') code: string) {
+    return this.admin.toggleProvider(req.user.userId, code, req.ip);
+  }
+
+  @Post('providers/test')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Live-test a country/method against the Netwalletpay API — shows what they have vs our DB' })
+  testProvider(
+    @Body('country')     country: string,
+    @Body('method')      method: string,
+    @Body('paymentType') paymentType: string,
+  ) {
+    if (!country || !method || !paymentType) {
+      throw new BadRequestException('country, method and paymentType are required');
+    }
+    return this.admin.testProvider(country.toUpperCase(), method.toUpperCase(), paymentType.toUpperCase() as 'COLLECTION' | 'PAYOUT');
   }
 
   // ── Pricing (admin-audited) ───────────────────────────────────────────────
