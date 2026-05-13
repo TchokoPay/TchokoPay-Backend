@@ -249,6 +249,23 @@ model Currency {
   quotesAsTarget Quote[] @relation("TargetCurrency")
 
   countries Country[]
+
+  limit TransactionLimit?
+}
+
+// ── Per-currency transaction floor/ceiling enforced during quote creation ──────
+model TransactionLimit {
+  id           String   @id @default(uuid())
+  currencyCode String   @unique
+  minAmount    Decimal  @db.Decimal(18, 2)
+  maxAmount    Decimal  @db.Decimal(18, 2)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  currency Currency @relation(fields: [currencyCode], references: [code])
+
+  @@index([currencyCode])
 }
 
 model Country {

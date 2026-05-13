@@ -576,6 +576,48 @@ export class AdminService {
     return updated;
   }
 
+  // ── Transaction Limits ────────────────────────────────────────────────────
+
+  async listLimits() {
+    return this.prisma.transactionLimit.findMany({
+      include: { currency: { select: { code: true, name: true, symbol: true, isCrypto: true } } },
+      orderBy: { currencyCode: 'asc' },
+    });
+  }
+
+  async upsertLimit(
+    adminId: string,
+    currencyCode: string,
+    minAmount: number,
+    maxAmount: number,
+    ip?: string,
+  ) {
+    if (minAmount <= 0) throw new BadRequestException('minAmount must be greater than 0');
+    if (maxAmount <= minAmount) throw new BadRequestException('maxAmount must be greater than minAmount');
+
+    const currency = await this.prisma.currency.findUnique({ where: { code: currencyCode.toUpperCase() } });
+    if (!currency) throw new NotFoundException(`Currency not found: ${currencyCode}`);
+
+    const limit = await this.prisma.transactionLimit.upsert({
+      where: { currencyCode: currencyCode.toUpperCase() },
+      create: { currencyCode: currencyCode.toUpperCase(), minAmount, maxAmount },
+      update: { minAmount, maxAmount, isActive: true },
+    });
+    await this.log(adminId, 'LIMIT_UPDATED', 'SYSTEM', currencyCode, { minAmount, maxAmount }, ip);
+    return limit;
+  }
+
+  async toggleLimit(adminId: string, currencyCode: string, ip?: string) {
+    const limit = await this.prisma.transactionLimit.findUnique({ where: { currencyCode: currencyCode.toUpperCase() } });
+    if (!limit) throw new NotFoundException(`No limit configured for: ${currencyCode}`);
+    const updated = await this.prisma.transactionLimit.update({
+      where: { currencyCode: currencyCode.toUpperCase() },
+      data: { isActive: !limit.isActive },
+    });
+    await this.log(adminId, limit.isActive ? 'LIMIT_DISABLED' : 'LIMIT_ENABLED', 'SYSTEM', currencyCode, {}, ip);
+    return updated;
+  }
+
   // ── Country & Provider Management ────────────────────────────────────────
 
   async listCountriesWithProviders() {
@@ -776,13 +818,15 @@ export class AdminService {
     // ── 3. Build reference + DTO ─────────────────────────────────────────────
     this.logger.log(sep);
     this.logger.log('📦  STEP 3 — Build PayinDto / PayoutDto');
-    const reference = `ADMINTEST${Date.now()}`;
+    // Use the same INV- prefix so normalizeOrderId strips it to a pure numeric
+    // OrderID — matching exactly what real payments send to Netwalletpay.
+    const reference = `INV-${Date.now()}`;
     const dto = {
       amount,
       currency,
       phone,
       reference,
-      description: `Admin test — ${paymentType} via ${providerCode}`,
+      description: `Admin test - ${paymentType} via ${providerCode}`,
       metadata: {
         country,
         method:       methodHint,   // drives mapMethod + getProviderFromDb hint

@@ -167,6 +167,11 @@ export class QuoteService {
     baseAmount = this.roundAmountForCurrency(baseAmount, baseCurrency.decimals, baseCurrency.isCrypto);
     feeAmount = this.roundAmountForCurrency(feeAmount, baseCurrency.decimals, baseCurrency.isCrypto);
 
+    // ── Transaction limit check (both sides must pass) ────────────────────────
+    // Cross-currency: if XAF→KES, both the XAF payer amount AND the KES recipient
+    // amount must be within their respective configured limits.
+    await this.checkTransactionLimits(baseAmount, baseCurrency.code, targetAmount, targetCurrency.code);
+
     // ============================
     // EXPIRY
     // ============================
@@ -343,6 +348,10 @@ export class QuoteService {
 
     baseAmount = this.roundAmountForCurrency(baseAmount, baseCurrency.decimals, baseCurrency.isCrypto);
     feeAmount = this.roundAmountForCurrency(feeAmount, baseCurrency.decimals, baseCurrency.isCrypto);
+
+    // Same cross-currency limit check as the full quote — preview should reject
+    // early so the user sees the error before confirming payment.
+    await this.checkTransactionLimits(baseAmount, baseCurrency.code, targetAmount, targetCurrency.code);
 
     console.log('🔍 QUOTE PREVIEW SUMMARY:');
     console.log(`  Currency: ${baseCurrency.code} → ${targetCurrency.code}`);
@@ -622,5 +631,59 @@ export class QuoteService {
 
     const factor = 10 ** decimals;
     return Math.ceil((amount - Number.EPSILON) * factor) / factor;
+  }
+
+  /**
+   * Enforce active transaction limits for both the payer's currency (base) and
+   * the recipient's currency (target).
+   *
+   * Cross-currency rule: XAF → KES requires BOTH the XAF amount ≥ XAF min AND
+   * the KES amount ≥ KES min. Even if the KES side is above its floor, a tiny
+   * XAF amount (e.g. 50 XAF) is still rejected because it's below the XAF floor.
+   */
+  private async checkTransactionLimits(
+    baseAmount: number,
+    baseCurrencyCode: string,
+    targetAmount: number,
+    targetCurrencyCode: string,
+  ): Promise<void> {
+    const [baseLimit, targetLimit] = await Promise.all([
+      this.prisma.transactionLimit.findFirst({
+        where: { currencyCode: baseCurrencyCode, isActive: true },
+      }),
+      this.prisma.transactionLimit.findFirst({
+        where: { currencyCode: targetCurrencyCode, isActive: true },
+      }),
+    ]);
+
+    if (baseLimit) {
+      const min = Number(baseLimit.minAmount);
+      const max = Number(baseLimit.maxAmount);
+      if (baseAmount < min) {
+        throw new BadRequestException(
+          `Minimum payment is ${min.toLocaleString()} ${baseCurrencyCode}`,
+        );
+      }
+      if (baseAmount > max) {
+        throw new BadRequestException(
+          `Maximum payment is ${max.toLocaleString()} ${baseCurrencyCode}`,
+        );
+      }
+    }
+
+    if (targetLimit) {
+      const min = Number(targetLimit.minAmount);
+      const max = Number(targetLimit.maxAmount);
+      if (targetAmount < min) {
+        throw new BadRequestException(
+          `Minimum receive amount is ${min.toLocaleString()} ${targetCurrencyCode}`,
+        );
+      }
+      if (targetAmount > max) {
+        throw new BadRequestException(
+          `Maximum receive amount is ${max.toLocaleString()} ${targetCurrencyCode}`,
+        );
+      }
+    }
   }
 }

@@ -209,6 +209,34 @@ export class AdminController {
     }, req.ip);
   }
 
+  // ── Transaction Limits ────────────────────────────────────────────────────
+
+  @Get('limits')
+  @ApiOperation({ summary: 'List all transaction limits' })
+  listLimits() {
+    return this.admin.listLimits();
+  }
+
+  @Post('limits')
+  @ApiOperation({ summary: 'Create or update a transaction limit for a currency' })
+  upsertLimit(
+    @Req() req: AuthenticatedRequest,
+    @Body('currencyCode') currencyCode: string,
+    @Body('minAmount')    minAmount: number,
+    @Body('maxAmount')    maxAmount: number,
+  ) {
+    if (!currencyCode || minAmount == null || maxAmount == null) {
+      throw new BadRequestException('currencyCode, minAmount and maxAmount are required');
+    }
+    return this.admin.upsertLimit(req.user.userId, currencyCode, Number(minAmount), Number(maxAmount), req.ip);
+  }
+
+  @Patch('limits/:code/toggle')
+  @ApiOperation({ summary: 'Enable or disable a transaction limit' })
+  toggleLimit(@Req() req: AuthenticatedRequest, @Param('code') code: string) {
+    return this.admin.toggleLimit(req.user.userId, code, req.ip);
+  }
+
   // ── Pricing (admin-audited) ───────────────────────────────────────────────
 
   @Get('pricing')

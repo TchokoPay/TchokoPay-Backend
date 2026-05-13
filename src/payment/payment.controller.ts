@@ -356,6 +356,16 @@ export class PaymentController {
   }
 
   // ============================
+  // TRANSACTION LIMITS (Public — read by payment wizard for live validation)
+  // ============================
+  @Public()
+  @Get('transaction-limits')
+  @ApiOperation({ summary: 'Active transaction limits per currency (no auth required)' })
+  getTransactionLimits() {
+    return this.service.getTransactionLimits();
+  }
+
+  // ============================
   // PUBLIC INVOICE LOOKUP (for /pay/[reference] page — no auth required)
   // ============================
   @Public()

@@ -157,6 +157,33 @@ async function main() {
     data: { isActive: false },
   });
   console.log(`  ✔ ${seeded} providers seeded (non-listed soft-deactivated)`);
+  // 4. Seed default transaction limits per currency
+  // Based on country minimum operator requirements + sensible maximums.
+  // Admins can override these from the dashboard.
+  const limits = [
+    { currencyCode: 'XAF', minAmount: 100,       maxAmount: 5_000_000  }, // CFA Franc (CM + GQ)
+    { currencyCode: 'KES', minAmount: 100,        maxAmount: 300_000    }, // Kenyan Shilling
+    { currencyCode: 'TZS', minAmount: 500,        maxAmount: 10_000_000 }, // Tanzanian Shilling
+    { currencyCode: 'UGX', minAmount: 500,        maxAmount: 10_000_000 }, // Ugandan Shilling
+    { currencyCode: 'NGN', minAmount: 100,        maxAmount: 5_000_000  }, // Nigerian Naira
+    { currencyCode: 'ZAR', minAmount: 10,         maxAmount: 200_000    }, // South African Rand
+    // Crypto — kept high to avoid dust amounts
+    { currencyCode: 'BTC', minAmount: 0.000_010,  maxAmount: 1          }, // Bitcoin
+    { currencyCode: 'SAT', minAmount: 1_000,      maxAmount: 100_000_000}, // Satoshis
+    { currencyCode: 'USD', minAmount: 1,          maxAmount: 50_000     }, // US Dollar (USDT)
+  ];
+
+  for (const { currencyCode, minAmount, maxAmount } of limits) {
+    const cur = await prisma.currency.findUnique({ where: { code: currencyCode } });
+    if (!cur) continue; // skip if currency not seeded
+    await prisma.transactionLimit.upsert({
+      where: { currencyCode },
+      create: { currencyCode, minAmount, maxAmount },
+      update: { minAmount, maxAmount, isActive: true },
+    });
+  }
+  console.log(`  ✔ ${limits.length} transaction limits seeded`);
+
   console.log('\n✅ Seed complete — matches live Netwalletpay API.');
 }
 

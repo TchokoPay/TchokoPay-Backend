@@ -24,6 +24,15 @@ export class PaymentService {
     );
   }
 
+  /** Returns all active transaction limits — used by the frontend to validate amounts before submission. */
+  async getTransactionLimits() {
+    return this.prisma.transactionLimit.findMany({
+      where: { isActive: true },
+      select: { currencyCode: true, minAmount: true, maxAmount: true },
+      orderBy: { currencyCode: 'asc' },
+    });
+  }
+
   /** Returns all active countries with their active Netwalletpay providers — used by the frontend payment wizard. */
   async getActiveCountries() {
     const countries = await this.prisma.country.findMany({
