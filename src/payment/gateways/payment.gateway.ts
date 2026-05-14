@@ -285,7 +285,7 @@ export class PaymentGateway
    */
   @OnEvent('payment.complete')
   handlePaymentComplete(event: PaymentCompleteEvent) {
-    console.log(
+    this.logger.log(
       `payment:complete -> ${event.invoiceReference} [${event.status}]`,
     );
 
@@ -329,7 +329,7 @@ export class PaymentGateway
    */
   @OnEvent('webhook.payment')
   handleWebhookPayment(event: WebhookPaymentEvent) {
-    console.log(
+    this.logger.log(
       `webhook:payment -> invoice:${event.invoiceReference} | ${event.provider} | ${event.eventType}`,
     );
 
