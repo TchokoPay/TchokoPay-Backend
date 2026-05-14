@@ -293,10 +293,17 @@ model Country {
 model PaymentAggregator {
   id        String   @id @default(uuid())
   /// Short lowercase identifier used in code — never changes once set.
-  /// Examples: 'netwalletpay', 'blink', 'stripe', 'flutterwave'
+  /// Examples: 'netwalletpay', 'zikopay', 'blink'
   code      String   @unique
   name      String
   isActive  Boolean  @default(true)
+
+  /// Routing priority — lower number = tried first.
+  /// Netwalletpay = 1 (primary), ZikoPay = 2 (fallback), etc.
+  priority  Int      @default(99)
+
+  /// Optional base URL override (useful for sandbox vs production)
+  baseUrl   String?
 
   providers PaymentProvider[]
 
@@ -304,6 +311,7 @@ model PaymentAggregator {
   updatedAt DateTime @updatedAt
 
   @@index([code])
+  @@index([priority])
 }
 
 /**

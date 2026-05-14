@@ -209,6 +209,31 @@ export class AdminController {
     }, req.ip);
   }
 
+  // ── Aggregator Management ─────────────────────────────────────────────────
+
+  @Get('aggregators')
+  @ApiOperation({ summary: 'List all aggregators with priority, status and active provider counts' })
+  listAggregators() {
+    return this.admin.listAggregators();
+  }
+
+  @Patch('aggregators/:code/toggle')
+  @ApiOperation({ summary: 'Enable or disable an aggregator' })
+  toggleAggregator(@Req() req: AuthenticatedRequest, @Param('code') code: string) {
+    return this.admin.toggleAggregator(req.user.userId, code, req.ip);
+  }
+
+  @Patch('aggregators/:code/priority')
+  @ApiOperation({ summary: 'Set routing priority for an aggregator (lower = tried first)' })
+  setAggregatorPriority(
+    @Req() req: AuthenticatedRequest,
+    @Param('code') code: string,
+    @Body('priority') priority: number,
+  ) {
+    if (priority == null) throw new BadRequestException('priority is required');
+    return this.admin.setAggregatorPriority(req.user.userId, code, Number(priority), req.ip);
+  }
+
   // ── Transaction Limits ────────────────────────────────────────────────────
 
   @Get('limits')

@@ -32,6 +32,7 @@ import { OrangeProvider } from './providers/orange.provider.js';
 import { BankProvider } from './providers/bank.provider.js';
 import { CryptoProvider } from './providers/crypto.provider.js';
 import { NetwalletpayProvider } from './providers/netwalletpay.provider.js';
+import { ZikoPayProvider } from './providers/zikopay.provider.js';
 
 // Services
 import { PhoneResolutionService } from './services/phone-resolution.service.js';
@@ -71,6 +72,7 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     BankProvider,
     CryptoProvider,
     NetwalletpayProvider,
+    ZikoPayProvider,
     // Services
     PhoneResolutionService,
     BlinkApiService,
@@ -80,6 +82,6 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     // WebSocket Gateway
     PaymentGateway,
   ],
-  exports: [PaymentService, NetwalletpayProvider],
+  exports: [PaymentService, NetwalletpayProvider, ZikoPayProvider],
 })
 export class PaymentModule {}

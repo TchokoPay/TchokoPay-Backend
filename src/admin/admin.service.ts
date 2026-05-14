@@ -576,6 +576,54 @@ export class AdminService {
     return updated;
   }
 
+  // ── Aggregator Management ─────────────────────────────────────────────────
+
+  async listAggregators() {
+    const aggregators = await this.prisma.paymentAggregator.findMany({
+      orderBy: { priority: 'asc' },
+    });
+    // Attach provider/country counts per aggregator
+    const counts = await Promise.all(
+      aggregators.map(async (a) => {
+        const providers = await this.prisma.paymentProvider.count({ where: { aggregatorId: a.id, isActive: true } });
+        const countries = await this.prisma.paymentProvider.findMany({
+          where: { aggregatorId: a.id, isActive: true },
+          distinct: ['countryId'],
+          select: { country: { select: { iso2: true, name: true } } },
+        });
+        return {
+          ...a,
+          activeProviders: providers,
+          countries: countries.map((c) => c.country),
+        };
+      }),
+    );
+    return counts;
+  }
+
+  async toggleAggregator(adminId: string, code: string, ip?: string) {
+    const agg = await this.prisma.paymentAggregator.findUnique({ where: { code } });
+    if (!agg) throw new NotFoundException(`Aggregator not found: ${code}`);
+    const updated = await this.prisma.paymentAggregator.update({
+      where: { code },
+      data: { isActive: !agg.isActive },
+    });
+    await this.log(adminId, agg.isActive ? 'AGGREGATOR_DISABLED' : 'AGGREGATOR_ENABLED', 'SYSTEM', code, { name: agg.name }, ip);
+    return updated;
+  }
+
+  async setAggregatorPriority(adminId: string, code: string, priority: number, ip?: string) {
+    if (priority < 1) throw new BadRequestException('Priority must be ≥ 1');
+    const agg = await this.prisma.paymentAggregator.findUnique({ where: { code } });
+    if (!agg) throw new NotFoundException(`Aggregator not found: ${code}`);
+    const updated = await this.prisma.paymentAggregator.update({
+      where: { code },
+      data: { priority },
+    });
+    await this.log(adminId, 'AGGREGATOR_PRIORITY_CHANGED', 'SYSTEM', code, { from: agg.priority, to: priority }, ip);
+    return updated;
+  }
+
   // ── Transaction Limits ────────────────────────────────────────────────────
 
   async listLimits() {

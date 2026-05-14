@@ -33,33 +33,59 @@ export class PaymentService {
     });
   }
 
-  /** Returns all active countries with their active Netwalletpay providers — used by the frontend payment wizard. */
+  /**
+   * Returns active countries with their providers for the payment wizard.
+   *
+   * Per-country routing logic:
+   *   For each country only the HIGHEST-PRIORITY active aggregator that has
+   *   providers is shown (lower priority number = tried first).
+   *   Example: CM has Netwalletpay (priority 1) → shows mtn_cm, orange_cm.
+   *            GH has only ZikoPay (priority 2) → shows ziko_mtn_gh, etc.
+   *   Countries with no active providers at all are excluded.
+   */
   async getActiveCountries() {
     const countries = await this.prisma.country.findMany({
       where: { isActive: true },
       include: {
         currency: { select: { code: true, symbol: true } },
         providers: {
-          where: { isActive: true, aggregator: { code: 'netwalletpay', isActive: true } },
-          include: { method: { select: { code: true } } },
-          orderBy: { providerCode: 'asc' },
+          where: { isActive: true, aggregator: { isActive: true } },
+          include: {
+            method:     { select: { code: true } },
+            aggregator: { select: { code: true, priority: true } },
+          },
+          orderBy: [
+            { aggregator: { priority: 'asc' } }, // primary first
+            { providerCode: 'asc' },
+          ],
         },
       },
       orderBy: { name: 'asc' },
     });
 
-    return countries.map(c => ({
-      iso2:      c.iso2,
-      name:      c.name,
-      dialCode:  c.dialCode,
-      currency:  c.currency.code,
-      providers: c.providers.map(p => ({
-        code:     p.providerCode,
-        name:     p.name,
-        method:   p.method.code,
-        requiresType: p.requiresType,
-      })),
-    }));
+    return countries
+      .map(c => {
+        if (!c.providers.length) return null;
+        // Pick only the highest-priority aggregator's providers for this country
+        const topPriority = (c.providers[0] as any).aggregator?.priority as number;
+        const primary = c.providers.filter(
+          (p: any) => p.aggregator?.priority === topPriority,
+        );
+        return {
+          iso2:      c.iso2,
+          name:      c.name,
+          dialCode:  c.dialCode,
+          currency:  c.currency.code,
+          aggregator: (c.providers[0] as any).aggregator?.code as string,
+          providers: primary.map((p: any) => ({
+            code:         p.providerCode as string,
+            name:         p.name         as string,
+            method:       p.method.code  as string,
+            requiresType: p.requiresType as boolean,
+          })),
+        };
+      })
+      .filter(Boolean);
   }
 
   async getInvoiceByReference(reference: string) {
