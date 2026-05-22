@@ -215,6 +215,14 @@ export class PaymentPollingService {
     });
     if (current?.status !== TransactionStatus.PROCESSING) return;
 
+    const attempt = await this.prisma.paymentAttempt.findUnique({
+      where: { id: job.attemptId },
+      include: {
+        currency: true,
+        invoice: true,
+      },
+    });
+
     await this.prisma.paymentAttempt.update({
       where: { id: job.attemptId },
       data: { status: TransactionStatus.FAILED, failureReason: reason },
@@ -229,6 +237,25 @@ export class PaymentPollingService {
       },
       data: { status: TransactionStatus.FAILED },
     });
+
+    if (attempt) {
+      this.paymentEventService.emitPaymentComplete({
+        invoiceId: attempt.invoiceId,
+        invoiceReference: attempt.invoice.reference,
+        status: 'FAILED',
+        stage: 'FAILED',
+        paymentMethod: attempt.method as string,
+        payoutMethod: attempt.invoice.payoutMethod,
+        amount: Number(attempt.amount),
+        currency: attempt.currency.code,
+        paymentDetails: {
+          status: 'FAILED',
+          transactionId: job.externalRef,
+        },
+        timestamp: new Date(),
+        userId: attempt.invoice.createdById ?? undefined,
+      });
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────

@@ -5,7 +5,10 @@ import { AppModule } from './app.module.js';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { getHttpCorsOrigins, isOriginAllowed } from './config/cors.config.js';
+import {
+  createCorsOriginDelegate,
+  getHttpCorsOrigins,
+} from './config/cors.config.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -14,15 +17,15 @@ async function bootstrap() {
 
   const allowedOrigins = getHttpCorsOrigins();
   app.enableCors({
-    origin: (origin, callback) => {
-      if (isOriginAllowed(origin, allowedOrigins)) {
-        callback(null, true);
-        return;
-      }
-
-      callback(new Error(`CORS blocked for origin: ${origin}`), false);
-    },
+    origin: createCorsOriginDelegate(allowedOrigins, 'HTTP CORS'),
     credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Authorization',
+      'Content-Type',
+      'X-Idempotency-Key',
+      'x-idempotency-key',
+    ],
   });
 
   app.use(cookieParser());

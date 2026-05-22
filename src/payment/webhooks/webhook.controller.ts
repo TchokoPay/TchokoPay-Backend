@@ -289,7 +289,7 @@ export class WebhookController {
 
     const attempt = await this.prisma.paymentAttempt.findFirst({
       where: { externalRef: invoiceId },
-      include: { invoice: true },
+      include: { invoice: true, currency: true },
     });
 
     if (!attempt) return;
@@ -325,26 +325,26 @@ export class WebhookController {
       timestamp: new Date(),
     });
 
-    if (attempt.invoice.createdById) {
-      await this.paymentEventService.notifyUser(attempt.invoice.createdById, {
-        invoiceId: attempt.invoiceId,
-        invoiceReference: attempt.invoice.reference,
-        status: 'FAILED',
-        stage: 'FAILED',
-        paymentMethod: attempt.method as string,
-        payoutMethod: attempt.invoice.payoutMethod,
-        amount: Number(attempt.amount),
-        currency: attempt.currencyId,
-        timestamp: new Date(),
-      });
-    }
+    await this.paymentEventService.emitPaymentComplete({
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
+      status: 'FAILED',
+      stage: 'FAILED',
+      paymentMethod: attempt.method as string,
+      payoutMethod: attempt.invoice.payoutMethod,
+      amount: Number(attempt.amount),
+      currency: attempt.currency.code,
+      paymentDetails: { status: 'FAILED', transactionId: invoiceId },
+      timestamp: new Date(),
+      userId: attempt.invoice.createdById ?? undefined,
+    });
   }
 
   /**
    * Netwalletpay: payin confirmed → update attempt SUCCESS → trigger payout
    */
   private async confirmPayin(
-    attempt: { id: string; invoiceId: string; method: string; amount: unknown; currencyId: string; invoice: { reference: string; createdById: string | null; payoutMethod: string } },
+    attempt: { id: string; invoiceId: string; method: string; amount: unknown; currencyId: string; currency?: { code: string }; invoice: { reference: string; createdById: string | null; payoutMethod: string } },
     transactionId: string,
     payload: Record<string, unknown>,
   ) {
@@ -367,7 +367,7 @@ export class WebhookController {
       paymentMethod: attempt.method as string,
       payoutMethod: attempt.invoice.payoutMethod,
       amount: Number(attempt.amount),
-      currency: attempt.currencyId,
+      currency: attempt.currency?.code ?? attempt.currencyId,
       paymentDetails: { status: 'PAID', transactionId },
       timestamp: new Date(),
       userId: attempt.invoice.createdById ?? undefined,
@@ -393,7 +393,7 @@ export class WebhookController {
       externalRef: transactionId,
       status: 'SUCCESS',
       amount: Number(attempt.amount),
-      currency: attempt.currencyId,
+      currency: attempt.currency?.code ?? attempt.currencyId,
       payload,
       timestamp: new Date(),
     });
@@ -402,6 +402,8 @@ export class WebhookController {
 
   /** Netwalletpay: payin failed → mark FAILED, no payout */
   private async failPayin(attempt: any, reason: string) {
+    const currencyCode = attempt.currency?.code ?? attempt.currencyId;
+
     await this.prisma.paymentAttempt.update({
       where: { id: attempt.id },
       data: { status: TransactionStatus.FAILED, failureReason: reason },
@@ -420,19 +422,37 @@ export class WebhookController {
 
     this.logger.log(`Netwalletpay payin FAILED: ${attempt.invoice.reference} (${reason})`);
 
-    if (attempt.invoice.createdById) {
-      await this.paymentEventService.notifyUser(attempt.invoice.createdById, {
-        invoiceId: attempt.invoiceId,
-        invoiceReference: attempt.invoice.reference,
+    await this.paymentEventService.emitWebhookPayment({
+      provider: 'netwalletpay',
+      eventType: 'payment.failed',
+      stage: 'FAILED',
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
+      externalRef: attempt.externalRef ?? undefined,
+      status: 'FAILED',
+      amount: Number(attempt.amount),
+      currency: currencyCode,
+      failureReason: reason,
+      payload: { reason },
+      timestamp: new Date(),
+    });
+
+    await this.paymentEventService.emitPaymentComplete({
+      invoiceId: attempt.invoiceId,
+      invoiceReference: attempt.invoice.reference,
+      status: 'FAILED',
+      stage: 'FAILED',
+      paymentMethod: attempt.method as string,
+      payoutMethod: attempt.invoice.payoutMethod,
+      amount: Number(attempt.amount),
+      currency: currencyCode,
+      paymentDetails: {
         status: 'FAILED',
-        stage: 'FAILED',
-        paymentMethod: attempt.method as string,
-        payoutMethod: attempt.invoice.payoutMethod,
-        amount: Number(attempt.amount),
-        currency: attempt.currencyId,
-        timestamp: new Date(),
-      });
-    }
+        transactionId: attempt.externalRef ?? undefined,
+      },
+      timestamp: new Date(),
+      userId: attempt.invoice.createdById ?? undefined,
+    });
   }
 
   /** Map invoice payoutMethod to the correct polling provider. */

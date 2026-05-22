@@ -11,7 +11,10 @@ import { Server, Socket } from 'socket.io';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { getWebsocketCorsOrigins } from '../../config/cors.config.js';
+import {
+  createCorsOriginDelegate,
+  getWebsocketCorsOrigins,
+} from '../../config/cors.config.js';
 import type {
   PaymentCompleteEvent,
   PaymentLifecycleStage,
@@ -71,6 +74,12 @@ function deriveLifecycleStage(invoice: {
   return 'AWAITING_PAYER';
 }
 
+const websocketCorsOrigins = getWebsocketCorsOrigins();
+const websocketCorsOrigin = createCorsOriginDelegate(
+  websocketCorsOrigins,
+  'WebSocket CORS',
+);
+
 /**
  * Payment WebSocket Gateway — namespace /payments
  *
@@ -88,10 +97,11 @@ function deriveLifecycleStage(invoice: {
  */
 @WebSocketGateway({
   cors: {
-    origin: getWebsocketCorsOrigins(),
+    origin: websocketCorsOrigin,
     credentials: true,
+    methods: ['GET', 'POST'],
   },
-  namespace: 'payments',
+  namespace: '/payments',
 })
 @Injectable()
 export class PaymentGateway
