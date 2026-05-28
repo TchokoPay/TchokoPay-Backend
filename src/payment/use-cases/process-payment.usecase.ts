@@ -318,6 +318,13 @@ export class ProcessPaymentUseCase {
             status: TransactionStatus.FAILED,
             failureReason: payinResponse?.error || 'Provider returned FAILED',
             providerResponse: payinResponse,
+            metadata: {
+              payerPhone: payerResolution.payerPhone ?? null,
+              payerCountry,
+              providerCode: dto.paymentProviderCode ?? null,
+              method: paymentMethod,
+              type: 'COLLECTION',
+            },
           },
         });
         await this.prisma.paymentInvoice.update({
@@ -345,6 +352,13 @@ export class ProcessPaymentUseCase {
           status: TransactionStatus.PROCESSING,
           externalRef,
           providerResponse: payinResponse,
+          metadata: {
+            payerPhone: payerResolution.payerPhone ?? null,
+            payerCountry,
+            providerCode: dto.paymentProviderCode ?? null,
+            method: paymentMethod,
+            type: 'COLLECTION',
+          },
         },
       });
 

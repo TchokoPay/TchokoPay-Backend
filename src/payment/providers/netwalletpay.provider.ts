@@ -260,8 +260,11 @@ export class NetwalletpayProvider implements PaymentProvider {
         status: 'SUCCESS',
         transactionId: response.data,
         provider: providerInfo.name,
+        providerCode: providerId,
         method: method,
         country: country,
+        phone,
+        formattedPhone,
       };
     } catch (error) {
       this.logger.error(`❌ Netwalletpay PAYIN failed:`, error);

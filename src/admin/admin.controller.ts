@@ -127,6 +127,78 @@ export class AdminController {
     return this.admin.getInvoiceDetail(id);
   }
 
+  // -- Refunds & admin withdrawals -----------------------------------------
+
+  @Get('payout-rails')
+  @ApiOperation({ summary: 'Active payout countries/providers grouped by aggregator' })
+  listPayoutRails() {
+    return this.admin.listPayoutRails();
+  }
+
+  @Get('refundable-transactions')
+  @ApiOperation({ summary: 'Search successful transactions that can be refunded' })
+  listRefundableTransactions(
+    @Query('search') search?: string,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+  ) {
+    return this.admin.listRefundableTransactions({ search, limit });
+  }
+
+  @Get('refunds')
+  @ApiOperation({ summary: 'List refund logs' })
+  listRefunds(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(25), ParseIntPipe) limit: number,
+  ) {
+    return this.admin.listRefunds({ page, limit: Math.min(limit, 100) });
+  }
+
+  @Post('refunds')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Execute a manual admin refund through a selected payout rail' })
+  createRefund(@Req() req: AuthenticatedRequest, @Body() dto: Record<string, unknown>) {
+    const amount = Number(dto.amount);
+    if (!dto.transactionId || !dto.phone || !dto.country || !dto.providerCode || !Number.isFinite(amount)) {
+      throw new BadRequestException('transactionId, amount, phone, country and providerCode are required');
+    }
+    return this.admin.createRefund(req.user.userId, {
+      transactionId: String(dto.transactionId),
+      amount,
+      phone: String(dto.phone),
+      country: String(dto.country),
+      providerCode: String(dto.providerCode),
+      aggregator: dto.aggregator == null ? undefined : String(dto.aggregator),
+      reason: dto.reason == null ? undefined : String(dto.reason),
+    }, req.ip);
+  }
+
+  @Get('withdrawals')
+  @ApiOperation({ summary: 'List admin withdrawal audit records' })
+  listWithdrawals(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(25), ParseIntPipe) limit: number,
+  ) {
+    return this.admin.listAdminWithdrawals({ page, limit: Math.min(limit, 100) });
+  }
+
+  @Post('withdrawals')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Execute a manual admin withdrawal through a selected payout rail' })
+  createWithdrawal(@Req() req: AuthenticatedRequest, @Body() dto: Record<string, unknown>) {
+    const amount = Number(dto.amount);
+    if (!dto.amount || !dto.phone || !dto.country || !dto.providerCode || !Number.isFinite(amount)) {
+      throw new BadRequestException('amount, phone, country and providerCode are required');
+    }
+    return this.admin.createAdminWithdrawal(req.user.userId, {
+      amount,
+      phone: String(dto.phone),
+      country: String(dto.country),
+      providerCode: String(dto.providerCode),
+      aggregator: dto.aggregator == null ? undefined : String(dto.aggregator),
+      note: dto.note == null ? undefined : String(dto.note),
+    }, req.ip);
+  }
+
   // ── KYC ──────────────────────────────────────────────────────────────────
 
   @Get('kyc')

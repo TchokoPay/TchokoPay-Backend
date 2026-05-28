@@ -5,11 +5,13 @@ import {
   ForbiddenException,
   Logger,
 } from '@nestjs/common';
+import { Prisma, TransactionStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { ConfigService } from '@nestjs/config';
 import { NetwalletpayProvider } from '../payment/providers/netwalletpay.provider.js';
+import { ZikoPayProvider } from '../payment/providers/zikopay.provider.js';
 
-type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM';
+type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM' | 'REFUND' | 'WITHDRAWAL';
 
 type FeeConfigInput = {
   baseCurrencyCode?: string | null;
@@ -31,6 +33,7 @@ export class AdminService {
     private prisma: PrismaService,
     private config: ConfigService,
     private netwalletpay: NetwalletpayProvider,
+    private zikopay: ZikoPayProvider,
   ) {}
 
   // ── Audit ─────────────────────────────────────────────────────────────────
@@ -304,7 +307,225 @@ export class AdminService {
       },
     });
     if (!inv) throw new NotFoundException('Invoice not found');
-    return inv;
+
+    const transaction = await this.prisma.transaction.findUnique({
+      where: { reference: inv.reference },
+      include: {
+        currency: { select: { code: true, symbol: true, name: true } },
+        quote: { include: { baseCurrency: true, targetCurrency: true } },
+        refunds: true,
+        user: { select: { id: true, firstName: true, lastName: true } },
+      },
+    });
+
+    return this.serializeInvoiceDetail(inv, transaction);
+  }
+
+  private serializeInvoiceDetail(inv: any, transaction: any) {
+    const latestAttempt = inv.attempts?.[0] ?? null;
+    const latestPayoutAttempt = inv.payout?.attempts?.[0] ?? null;
+    const quote = inv.quote ?? transaction?.quote ?? null;
+    const baseCurrency = quote?.baseCurrency ?? latestAttempt?.currency ?? transaction?.currency ?? null;
+    const targetCurrency = quote?.targetCurrency ?? inv.currency ?? null;
+    const paidAmount = this.numberValue(quote?.baseAmount ?? latestAttempt?.amount ?? transaction?.baseAmount ?? inv.amount) ?? 0;
+    const receivedAmount = this.numberValue(quote?.targetAmount ?? inv.payout?.amount ?? inv.amount) ?? 0;
+    const fee = this.numberValue(quote?.fee ?? latestAttempt?.fee ?? transaction?.fee ?? 0) ?? 0;
+    const netAmount = this.numberValue(latestAttempt?.netAmount ?? transaction?.netAmount ?? (paidAmount - fee)) ?? 0;
+    const successfulRefunds = transaction?.refunds?.filter((refund: any) => refund.status === TransactionStatus.SUCCESS) ?? [];
+    const refundedAmount = successfulRefunds.reduce((sum: number, refund: any) => sum + (this.numberValue(refund.amount) ?? 0), 0);
+    const paymentInstrument = this.paymentInstrumentFromAttempt(latestAttempt);
+
+    return {
+      id: inv.id,
+      reference: inv.reference,
+      description: inv.description,
+      status: inv.status,
+      country: inv.country,
+      flow: inv.flow,
+      paymentMethod: inv.paymentMethod,
+      payoutMethod: inv.payoutMethod,
+      payoutProviderCode: inv.payoutProviderCode,
+      recipientPhone: inv.recipientPhone,
+      recipientName: inv.recipientName,
+      expiresAt: inv.expiresAt,
+      createdAt: inv.createdAt,
+      updatedAt: inv.updatedAt,
+      currency: {
+        code: inv.currency?.code,
+        symbol: inv.currency?.symbol ?? null,
+        name: inv.currency?.name ?? null,
+      },
+      payer: inv.createdBy
+        ? { type: 'USER', ...inv.createdBy }
+        : { type: 'GUEST', id: null, firstName: 'Guest', lastName: 'payer' },
+      recipient: inv.recipient
+        ? { type: 'USER', ...inv.recipient, phone: inv.recipientPhone }
+        : {
+            type: inv.recipientPhone || inv.recipientName ? 'GUEST' : 'UNKNOWN',
+            id: null,
+            firstName: inv.recipientName || 'External',
+            lastName: inv.recipientPhone ? 'recipient' : '',
+            phone: inv.recipientPhone,
+          },
+      financial: {
+        paidAmount,
+        paidCurrency: baseCurrency
+          ? { code: baseCurrency.code, symbol: baseCurrency.symbol ?? null, name: baseCurrency.name ?? null }
+          : null,
+        receivedAmount,
+        receivedCurrency: targetCurrency
+          ? { code: targetCurrency.code, symbol: targetCurrency.symbol ?? null, name: targetCurrency.name ?? null }
+          : null,
+        fee,
+        feeCurrency: baseCurrency
+          ? { code: baseCurrency.code, symbol: baseCurrency.symbol ?? null, name: baseCurrency.name ?? null }
+          : null,
+        netAmount,
+        exchangeRate: this.numberValue(quote?.exchangeRate ?? transaction?.exchangeRate ?? null, null),
+        rateSource: quote?.rateSource ?? transaction?.rateSource ?? null,
+      },
+      payment: latestAttempt
+        ? {
+            id: latestAttempt.id,
+            status: latestAttempt.status,
+            method: latestAttempt.method,
+            flow: latestAttempt.flow,
+            provider: latestAttempt.provider,
+            externalRef: latestAttempt.externalRef,
+            amount: this.numberValue(latestAttempt.amount),
+            currency: {
+              code: latestAttempt.currency?.code,
+              symbol: latestAttempt.currency?.symbol ?? null,
+              name: latestAttempt.currency?.name ?? null,
+            },
+            fee: this.numberValue(latestAttempt.fee ?? null, null),
+            netAmount: this.numberValue(latestAttempt.netAmount ?? null, null),
+            failureReason: latestAttempt.failureReason,
+            instrument: paymentInstrument,
+            createdAt: latestAttempt.createdAt,
+            updatedAt: latestAttempt.updatedAt,
+          }
+        : null,
+      payout: inv.payout
+        ? {
+            id: inv.payout.id,
+            status: inv.payout.status,
+            amount: this.numberValue(inv.payout.amount),
+            currency: inv.payout.currency,
+            method: inv.payout.method,
+            provider: latestPayoutAttempt?.provider ?? inv.payoutMethod,
+            providerCode: inv.payoutProviderCode,
+            phone: inv.recipientPhone,
+            country: inv.country,
+            externalRef: latestPayoutAttempt?.externalRef ?? null,
+            createdAt: inv.payout.createdAt,
+            updatedAt: inv.payout.updatedAt,
+            attempts: inv.payout.attempts.map((attempt: any) => ({
+              id: attempt.id,
+              status: attempt.status,
+              provider: attempt.provider,
+              externalRef: attempt.externalRef,
+              createdAt: attempt.createdAt,
+            })),
+          }
+        : null,
+      attempts: inv.attempts.map((attempt: any) => ({
+        id: attempt.id,
+        status: attempt.status,
+        method: attempt.method,
+        flow: attempt.flow,
+        provider: attempt.provider,
+        externalRef: attempt.externalRef,
+        amount: this.numberValue(attempt.amount),
+        currency: {
+          code: attempt.currency?.code,
+          symbol: attempt.currency?.symbol ?? null,
+          name: attempt.currency?.name ?? null,
+        },
+        fee: this.numberValue(attempt.fee ?? null, null),
+        netAmount: this.numberValue(attempt.netAmount ?? null, null),
+        failureReason: attempt.failureReason,
+        instrument: this.paymentInstrumentFromAttempt(attempt),
+        createdAt: attempt.createdAt,
+        updatedAt: attempt.updatedAt,
+      })),
+      ledgerTransaction: transaction
+        ? {
+            id: transaction.id,
+            reference: transaction.reference,
+            status: transaction.status,
+            amount: this.numberValue(transaction.amount),
+            fee: this.numberValue(transaction.fee ?? null, null),
+            netAmount: this.numberValue(transaction.netAmount ?? null, null),
+            refundedAmount,
+            refundStatus: this.metadataObject(transaction.metadata).refundStatus ?? null,
+            user: transaction.user,
+            createdAt: transaction.createdAt,
+            updatedAt: transaction.updatedAt,
+          }
+        : null,
+      paymentLink: inv.paymentLink
+        ? {
+            id: inv.paymentLink.id,
+            url: inv.paymentLink.url,
+            isActive: inv.paymentLink.isActive,
+            expiresAt: inv.paymentLink.expiresAt,
+          }
+        : null,
+    };
+  }
+
+  private numberValue(value: unknown, fallback: number | null = 0) {
+    if (value === null || value === undefined) return fallback;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  private paymentInstrumentFromAttempt(attempt: any) {
+    if (!attempt) return null;
+    const metadata = this.metadataObject(attempt.metadata);
+    const response = this.metadataObject(attempt.providerResponse);
+    const data = this.metadataObject(response.data as Prisma.JsonValue);
+    const paymentRequest = this.metadataObject(response.paymentRequest as Prisma.JsonValue);
+    const customer = this.metadataObject(response.customer as Prisma.JsonValue);
+
+    return {
+      phone: this.firstString(
+        metadata.payerPhone,
+        metadata.phone,
+        response.phone,
+        response.formattedPhone,
+        response.PhoneNumber,
+        response.phoneNumber,
+        data.phone,
+        data.formattedPhone,
+        data.PhoneNumber,
+        data.phoneNumber,
+        paymentRequest.phone,
+        paymentRequest.PhoneNumber,
+        paymentRequest.phoneNumber,
+        customer.phone,
+      ),
+      account: this.firstString(
+        metadata.account,
+        metadata.accountNumber,
+        response.account,
+        response.accountNumber,
+        response.paymentRequest,
+        data.account,
+        data.accountNumber,
+        paymentRequest.request,
+        paymentRequest.paymentRequest,
+      ),
+      country: this.firstString(metadata.payerCountry, metadata.country, response.country, data.country),
+      providerCode: this.firstString(metadata.providerCode, response.providerCode, data.providerCode),
+      reference: this.firstString(attempt.externalRef, response.transactionId, response.reference, data.transactionId, data.reference),
+    };
+  }
+
+  private firstString(...values: unknown[]) {
+    const found = values.find((value) => typeof value === 'string' && value.trim().length > 0);
+    return typeof found === 'string' ? found : null;
   }
 
   // ── KYC ──────────────────────────────────────────────────────────────────
@@ -941,6 +1162,873 @@ export class AdminService {
       message:       ok ? 'Transaction accepted' : (result.error ?? 'Transaction failed'),
       raw:           result,
     };
+  }
+
+  // -- Refunds & admin withdrawals -----------------------------------------
+
+  async listPayoutRails() {
+    const countries = await this.prisma.country.findMany({
+      where: {
+        isActive: true,
+        providers: {
+          some: {
+            isActive: true,
+            aggregator: { isActive: true, code: { in: ['netwalletpay', 'zikopay'] } },
+            method: { isActive: true },
+          },
+        },
+      },
+      include: {
+        currency: { select: { code: true, symbol: true, name: true } },
+        providers: {
+          where: {
+            isActive: true,
+            aggregator: { isActive: true, code: { in: ['netwalletpay', 'zikopay'] } },
+            method: { isActive: true },
+          },
+          include: {
+            aggregator: { select: { code: true, name: true, priority: true } },
+            method: { select: { code: true, name: true } },
+          },
+          orderBy: [{ aggregator: { priority: 'asc' } }, { name: 'asc' }],
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    return countries.map((country) => ({
+      id: country.id,
+      iso2: country.iso2,
+      name: country.name,
+      dialCode: country.dialCode,
+      currency: country.currency,
+      providers: country.providers.map((provider) => ({
+        id: provider.id,
+        providerCode: provider.providerCode,
+        name: provider.name,
+        requiresType: provider.requiresType,
+        aggregator: provider.aggregator,
+        method: provider.method,
+      })),
+    }));
+  }
+
+  async listRefundableTransactions(params: { search?: string; limit?: number }) {
+    const search = params.search?.trim();
+    const limit = Math.min(Math.max(params.limit ?? 20, 1), 50);
+
+    const searchWhere = search
+      ? {
+          OR: [
+              { id: { contains: search, mode: 'insensitive' } },
+              { reference: { contains: search, mode: 'insensitive' } },
+              { recipientPhone: { contains: search } },
+              { attempts: { some: { externalRef: { contains: search, mode: 'insensitive' } } } },
+            ],
+        }
+      : {};
+
+    const invoices = await this.prisma.paymentInvoice.findMany({
+      where: {
+        AND: [
+          searchWhere,
+          { attempts: { some: { status: TransactionStatus.SUCCESS } } },
+          {
+            OR: [
+              { payout: { is: { status: TransactionStatus.FAILED } } },
+              { payout: { is: { attempts: { some: { status: TransactionStatus.FAILED } } } } },
+            ],
+          },
+        ],
+      },
+      take: limit * 2,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        currency: { select: { code: true, symbol: true, name: true } },
+        quote: { include: { baseCurrency: true, targetCurrency: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        recipient: { select: { id: true, firstName: true, lastName: true } },
+        attempts: { orderBy: { createdAt: 'desc' }, include: { currency: true } },
+        payout: { include: { attempts: { orderBy: { createdAt: 'desc' } } } },
+      },
+    });
+
+    const references = invoices.map((invoice) => invoice.reference);
+    const [transactions, invoiceRefundLogs] = await Promise.all([
+      this.prisma.transaction.findMany({
+        where: { reference: { in: references } },
+        include: {
+          currency: { select: { code: true, symbol: true } },
+          refunds: true,
+          user: { select: { id: true, firstName: true, lastName: true } },
+        },
+      }),
+      this.prisma.adminAuditLog.findMany({
+        where: {
+          action: 'ADMIN_REFUND',
+          targetType: 'INVOICE',
+          targetId: { in: references },
+        },
+      }),
+    ]);
+
+    const transactionByReference = new Map(transactions.map((transaction) => [transaction.reference, transaction]));
+    const logsByReference = new Map<string, typeof invoiceRefundLogs>();
+    for (const log of invoiceRefundLogs) {
+      if (!log.targetId) continue;
+      logsByReference.set(log.targetId, [...(logsByReference.get(log.targetId) ?? []), log]);
+    }
+
+    return invoices
+      .map((invoice) => this.serializeRefundableInvoice(
+        invoice,
+        transactionByReference.get(invoice.reference) ?? null,
+        logsByReference.get(invoice.reference) ?? [],
+      ))
+      .filter((invoice) => invoice.isRefundable)
+      .slice(0, limit);
+  }
+
+  async listRefunds(params: { page: number; limit: number }) {
+    const page = Math.max(params.page, 1);
+    const limit = Math.min(Math.max(params.limit, 1), 100);
+    const skip = (page - 1) * limit;
+
+    const take = skip + limit;
+    const [refunds, refundTotal, invoiceRefundLogs, invoiceRefundTotal] = await Promise.all([
+      this.prisma.refund.findMany({
+        take,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          transaction: {
+            include: {
+              currency: { select: { code: true, symbol: true } },
+              user: { select: { id: true, firstName: true, lastName: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.refund.count(),
+      this.prisma.adminAuditLog.findMany({
+        where: { action: 'ADMIN_REFUND', targetType: 'INVOICE' },
+        take,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.adminAuditLog.count({ where: { action: 'ADMIN_REFUND', targetType: 'INVOICE' } }),
+    ]);
+
+    const refundRows = refunds.map((refund) => ({
+      id: refund.id,
+      transactionId: refund.transactionId,
+      amount: Number(refund.amount),
+      reason: refund.reason,
+      status: refund.status,
+      provider: refund.provider,
+      externalRef: refund.externalRef,
+      createdAt: refund.createdAt,
+      transaction: {
+        id: refund.transaction.id,
+        reference: refund.transaction.reference,
+        amount: Number(refund.transaction.amount),
+        fee: Number(refund.transaction.fee ?? 0),
+        netAmount: Number(refund.transaction.netAmount ?? 0),
+        currency: refund.transaction.currency,
+        user: refund.transaction.user,
+      },
+    }));
+
+    const invoiceRows = invoiceRefundLogs.map((entry) => {
+      const currency = this.readMetadataString(entry.metadata, 'originalCurrency')
+        ?? this.readMetadataString(entry.metadata, 'currency')
+        ?? '';
+      const amount = this.readMetadataNumber(entry.metadata, 'amount') ?? 0;
+      return {
+        id: entry.id,
+        transactionId: this.readMetadataString(entry.metadata, 'invoiceId') ?? entry.targetId ?? entry.id,
+        amount,
+        reason: null,
+        status: this.readMetadataString(entry.metadata, 'status') ?? 'UNKNOWN',
+        provider: this.readMetadataString(entry.metadata, 'providerCode'),
+        externalRef: this.readMetadataString(entry.metadata, 'externalRef'),
+        createdAt: entry.createdAt,
+        transaction: {
+          id: this.readMetadataString(entry.metadata, 'invoiceId') ?? entry.targetId ?? entry.id,
+          reference: this.readMetadataString(entry.metadata, 'invoiceReference') ?? entry.targetId ?? '',
+          amount,
+          fee: 0,
+          netAmount: amount,
+          currency: { code: currency, symbol: null },
+          user: null,
+        },
+      };
+    });
+
+    const rows = [...refundRows, ...invoiceRows]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(skip, skip + limit);
+
+    return {
+      data: rows,
+      meta: { total: refundTotal + invoiceRefundTotal, page, limit, pages: Math.ceil((refundTotal + invoiceRefundTotal) / limit) },
+    };
+  }
+
+  async listAdminWithdrawals(params: { page: number; limit: number }) {
+    const page = Math.max(params.page, 1);
+    const limit = Math.min(Math.max(params.limit, 1), 100);
+    const skip = (page - 1) * limit;
+
+    const where = { action: 'ADMIN_WITHDRAWAL' };
+    const [items, total] = await Promise.all([
+      this.prisma.adminAuditLog.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.adminAuditLog.count({ where }),
+    ]);
+
+    return {
+      data: items.map((entry) => ({
+        id: entry.id,
+        adminId: entry.adminId,
+        status: this.readMetadataString(entry.metadata, 'status') ?? 'UNKNOWN',
+        amount: this.readMetadataNumber(entry.metadata, 'amount') ?? 0,
+        currency: this.readMetadataString(entry.metadata, 'currency') ?? '',
+        country: this.readMetadataString(entry.metadata, 'country') ?? '',
+        phone: this.readMetadataString(entry.metadata, 'phone') ?? '',
+        providerCode: this.readMetadataString(entry.metadata, 'providerCode') ?? '',
+        providerName: this.readMetadataString(entry.metadata, 'providerName') ?? '',
+        aggregator: this.readMetadataString(entry.metadata, 'aggregator') ?? '',
+        externalRef: this.readMetadataString(entry.metadata, 'externalRef'),
+        message: this.readMetadataString(entry.metadata, 'message'),
+        createdAt: entry.createdAt,
+      })),
+      meta: { total, page, limit, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  async createRefund(
+    adminId: string,
+    dto: {
+      transactionId: string;
+      amount: number;
+      phone: string;
+      country: string;
+      providerCode: string;
+      aggregator?: string;
+      reason?: string;
+    },
+    ip?: string,
+  ) {
+    const amount = this.parsePositiveAmount(dto.amount, 'amount');
+    const transactionKey = dto.transactionId?.trim();
+    if (!transactionKey) throw new BadRequestException('transactionId is required');
+    if (!dto.phone?.trim()) throw new BadRequestException('phone is required');
+    if (!dto.country?.trim()) throw new BadRequestException('country is required');
+    if (!dto.providerCode?.trim()) throw new BadRequestException('providerCode is required');
+
+    const invoice = await this.prisma.paymentInvoice.findFirst({
+      where: {
+        OR: [
+          { id: transactionKey },
+          { reference: transactionKey },
+          { attempts: { some: { externalRef: transactionKey } } },
+        ],
+      },
+      include: {
+        currency: { select: { code: true, symbol: true, name: true } },
+        quote: { include: { baseCurrency: true, targetCurrency: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        recipient: { select: { id: true, firstName: true, lastName: true } },
+        attempts: { orderBy: { createdAt: 'desc' }, include: { currency: true } },
+        payout: { include: { attempts: { orderBy: { createdAt: 'desc' } } } },
+      },
+    });
+
+    const transaction = await this.prisma.transaction.findFirst({
+      where: {
+        OR: [
+          { id: transactionKey },
+          { reference: transactionKey },
+          { externalRef: transactionKey },
+          ...(invoice ? [{ reference: invoice.reference }] : []),
+        ],
+      },
+      include: {
+        currency: { select: { code: true, symbol: true } },
+        refunds: true,
+        user: { select: { id: true, firstName: true, lastName: true } },
+      },
+    });
+    if (!invoice && !transaction) throw new NotFoundException('Transaction not found');
+
+    if (invoice) {
+      const invoiceRefundLogs = await this.prisma.adminAuditLog.findMany({
+        where: { action: 'ADMIN_REFUND', targetType: 'INVOICE', targetId: invoice.reference },
+      });
+      const candidate = this.serializeRefundableInvoice(invoice, transaction, invoiceRefundLogs);
+      if (!candidate.isRefundable) {
+        throw new BadRequestException('Only payments with a successful pay-in can be refunded');
+      }
+      if (amount.gt(candidate.remainingRefundable)) {
+        throw new BadRequestException(
+          `Refund exceeds available amount. Max refundable is ${candidate.remainingRefundable} ${candidate.currency.code}`,
+        );
+      }
+
+      const refund = transaction
+        ? await this.prisma.refund.create({
+            data: {
+              transaction: { connect: { id: transaction.id } },
+              amount,
+              reason: dto.reason?.trim() || null,
+              status: TransactionStatus.PROCESSING,
+              provider: dto.providerCode.trim(),
+            },
+          })
+        : null;
+
+      const reference = this.buildProviderReference();
+      const payout = await this.dispatchAdminPayout({
+        country: dto.country,
+        providerCode: dto.providerCode,
+        phone: dto.phone,
+        amount: Number(amount),
+        reference,
+        description: 'TchokoPay refund',
+        aggregator: dto.aggregator,
+      });
+
+      const ok = payout.result.status !== 'FAILED';
+      const finalStatus = ok ? TransactionStatus.SUCCESS : TransactionStatus.FAILED;
+      const externalRef = payout.result.transactionId ?? null;
+      const updatedRefund = refund
+        ? await this.prisma.refund.update({
+            where: { id: refund.id },
+            data: {
+              status: finalStatus,
+              provider: payout.provider.providerCode,
+              externalRef,
+            },
+          })
+        : null;
+
+      if (ok) {
+        const refundedAmount = new Prisma.Decimal(candidate.refundedAmount).add(amount);
+        const refundStatus = refundedAmount.gte(candidate.maxRefundable) ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+        if (transaction) {
+          const metadata = this.metadataObject(transaction.metadata);
+          metadata.refundStatus = refundStatus;
+          metadata.refundedAmount = Number(refundedAmount);
+          metadata.refundableAmount = candidate.maxRefundable;
+          metadata.lastRefundId = updatedRefund?.id ?? reference;
+          metadata.lastRefundAt = new Date().toISOString();
+
+          await this.prisma.transaction.update({
+            where: { id: transaction.id },
+            data: { metadata },
+          });
+        } else {
+          const paidAttempt = invoice.attempts.find((attempt: any) => attempt.status === TransactionStatus.SUCCESS) ?? invoice.attempts[0];
+          if (paidAttempt) {
+            const metadata = this.metadataObject(paidAttempt.metadata);
+            metadata.refundStatus = refundStatus;
+            metadata.refundedAmount = Number(refundedAmount);
+            metadata.refundableAmount = candidate.maxRefundable;
+            metadata.lastRefundReference = reference;
+            metadata.lastRefundAt = new Date().toISOString();
+            await this.prisma.paymentAttempt.update({
+              where: { id: paidAttempt.id },
+              data: { metadata },
+            });
+          }
+        }
+      }
+
+      await this.log(adminId, 'ADMIN_REFUND', updatedRefund ? 'REFUND' : 'INVOICE', updatedRefund?.id ?? invoice.reference, {
+        status: finalStatus,
+        invoiceId: invoice.id,
+        invoiceReference: invoice.reference,
+        transactionId: transaction?.id ?? null,
+        refundId: updatedRefund?.id ?? null,
+        amount: Number(amount),
+        currency: payout.currency,
+        originalCurrency: candidate.currency.code,
+        country: payout.country,
+        phone: dto.phone,
+        providerCode: payout.provider.providerCode,
+        providerName: payout.provider.name,
+        aggregator: payout.aggregator.code,
+        externalRef,
+        message: ok ? 'Refund payout accepted' : (payout.result.error ?? 'Refund payout failed'),
+      }, ip);
+
+      return {
+        ok,
+        refund: {
+          id: updatedRefund?.id ?? reference,
+          transactionId: updatedRefund?.transactionId ?? transaction?.id ?? invoice.id,
+          amount: Number(amount),
+          reason: dto.reason?.trim() || null,
+          status: finalStatus,
+          provider: payout.provider.providerCode,
+          externalRef,
+          createdAt: updatedRefund?.createdAt ?? new Date(),
+        },
+        transaction: candidate,
+        payout: {
+          reference,
+          externalRef,
+          providerCode: payout.provider.providerCode,
+          providerName: payout.provider.name,
+          aggregator: payout.aggregator.code,
+          status: payout.result.status,
+          message: ok ? 'Refund payout accepted' : (payout.result.error ?? 'Refund payout failed'),
+          raw: payout.result,
+        },
+      };
+    }
+
+    if (!transaction || transaction.status !== TransactionStatus.SUCCESS) {
+      throw new BadRequestException('Only successful transactions can be refunded');
+    }
+
+    const refundSummary = this.calculateRefundSummary(transaction);
+    if (amount.gt(refundSummary.remaining)) {
+      throw new BadRequestException(
+        `Refund exceeds available amount. Max refundable is ${refundSummary.remaining.toString()} ${transaction.currency.code}`,
+      );
+    }
+
+    const refund = await this.prisma.refund.create({
+      data: {
+        transaction: { connect: { id: transaction.id } },
+        amount,
+        reason: dto.reason?.trim() || null,
+        status: TransactionStatus.PROCESSING,
+        provider: dto.providerCode.trim(),
+      },
+    });
+
+    const reference = this.buildProviderReference();
+    const payout = await this.dispatchAdminPayout({
+      country: dto.country,
+      providerCode: dto.providerCode,
+      phone: dto.phone,
+      amount: Number(amount),
+      reference,
+      description: 'TchokoPay refund',
+      aggregator: dto.aggregator,
+    });
+
+    const ok = payout.result.status !== 'FAILED';
+    const finalStatus = ok ? TransactionStatus.SUCCESS : TransactionStatus.FAILED;
+    const externalRef = payout.result.transactionId ?? null;
+
+    const updatedRefund = await this.prisma.refund.update({
+      where: { id: refund.id },
+      data: {
+        status: finalStatus,
+        provider: payout.provider.providerCode,
+        externalRef,
+      },
+    });
+
+    if (ok) {
+      const refundedAmount = refundSummary.refunded.add(amount);
+      const status = refundedAmount.gte(refundSummary.maxRefundable)
+        ? 'REFUNDED'
+        : 'PARTIALLY_REFUNDED';
+      const metadata = this.metadataObject(transaction.metadata);
+      metadata.refundStatus = status;
+      metadata.refundedAmount = Number(refundedAmount);
+      metadata.refundableAmount = Number(refundSummary.maxRefundable);
+      metadata.lastRefundId = refund.id;
+      metadata.lastRefundAt = new Date().toISOString();
+
+      await this.prisma.transaction.update({
+        where: { id: transaction.id },
+        data: { metadata },
+      });
+    }
+
+    await this.log(adminId, 'ADMIN_REFUND', 'REFUND', refund.id, {
+      status: finalStatus,
+      transactionId: transaction.id,
+      transactionReference: transaction.reference,
+      amount: Number(amount),
+      currency: payout.currency,
+      country: payout.country,
+      phone: dto.phone,
+      providerCode: payout.provider.providerCode,
+      providerName: payout.provider.name,
+      aggregator: payout.aggregator.code,
+      externalRef,
+      message: ok ? 'Refund payout accepted' : (payout.result.error ?? 'Refund payout failed'),
+    }, ip);
+
+    return {
+      ok,
+      refund: {
+        id: updatedRefund.id,
+        transactionId: updatedRefund.transactionId,
+        amount: Number(updatedRefund.amount),
+        reason: updatedRefund.reason,
+        status: updatedRefund.status,
+        provider: updatedRefund.provider,
+        externalRef: updatedRefund.externalRef,
+        createdAt: updatedRefund.createdAt,
+      },
+      transaction: this.serializeRefundableTransaction({
+        ...transaction,
+        refunds: [...transaction.refunds, updatedRefund],
+      }),
+      payout: {
+        reference,
+        externalRef,
+        providerCode: payout.provider.providerCode,
+        providerName: payout.provider.name,
+        aggregator: payout.aggregator.code,
+        status: payout.result.status,
+        message: ok ? 'Refund payout accepted' : (payout.result.error ?? 'Refund payout failed'),
+        raw: payout.result,
+      },
+    };
+  }
+
+  async createAdminWithdrawal(
+    adminId: string,
+    dto: {
+      amount: number;
+      phone: string;
+      country: string;
+      providerCode: string;
+      aggregator?: string;
+      note?: string;
+    },
+    ip?: string,
+  ) {
+    const amount = this.parsePositiveAmount(dto.amount, 'amount');
+    if (!dto.phone?.trim()) throw new BadRequestException('phone is required');
+    if (!dto.country?.trim()) throw new BadRequestException('country is required');
+    if (!dto.providerCode?.trim()) throw new BadRequestException('providerCode is required');
+
+    const reference = this.buildProviderReference();
+    const payout = await this.dispatchAdminPayout({
+      country: dto.country,
+      providerCode: dto.providerCode,
+      phone: dto.phone,
+      amount: Number(amount),
+      reference,
+      description: 'Admin withdrawal',
+      aggregator: dto.aggregator,
+    });
+
+    const ok = payout.result.status !== 'FAILED';
+    const status = ok ? 'SUCCESS' : 'FAILED';
+    const externalRef = payout.result.transactionId ?? null;
+    const message = ok ? 'Withdrawal payout accepted' : (payout.result.error ?? 'Withdrawal payout failed');
+
+    await this.log(adminId, 'ADMIN_WITHDRAWAL', 'WITHDRAWAL', reference, {
+      status,
+      amount: Number(amount),
+      currency: payout.currency,
+      country: payout.country,
+      phone: dto.phone,
+      providerCode: payout.provider.providerCode,
+      providerName: payout.provider.name,
+      aggregator: payout.aggregator.code,
+      externalRef,
+      message,
+      note: dto.note?.trim() || null,
+    }, ip);
+
+    return {
+      ok,
+      status,
+      reference,
+      amount: Number(amount),
+      currency: payout.currency,
+      country: payout.country,
+      phone: dto.phone,
+      providerCode: payout.provider.providerCode,
+      providerName: payout.provider.name,
+      aggregator: payout.aggregator.code,
+      externalRef,
+      message,
+      raw: payout.result,
+    };
+  }
+
+  private async dispatchAdminPayout(params: {
+    country: string;
+    providerCode: string;
+    phone: string;
+    amount: number;
+    reference: string;
+    description: string;
+    aggregator?: string;
+  }) {
+    const provider = await this.resolvePayoutProvider(params.country, params.providerCode, params.aggregator);
+    const adapter = this.getAggregatorAdapter(provider.aggregator.code);
+    const methodHint = this.methodHintForProvider(provider.providerCode, provider.method.code);
+    const currency = provider.country.currency?.code ?? 'XAF';
+
+    const result = await adapter.payout({
+      amount: params.amount,
+      currency,
+      phone: params.phone.trim(),
+      reference: params.reference,
+      description: params.description,
+      metadata: {
+        country: provider.country.iso2,
+        method: methodHint,
+        providerCode: provider.providerCode,
+        type: 'PAYOUT',
+      },
+    });
+
+    return {
+      result,
+      provider,
+      aggregator: provider.aggregator,
+      country: provider.country.iso2,
+      currency,
+    };
+  }
+
+  private async resolvePayoutProvider(country: string, providerCode: string, aggregatorCode?: string) {
+    const aggregator = aggregatorCode?.trim().toLowerCase();
+    const provider = await this.prisma.paymentProvider.findFirst({
+      where: {
+        providerCode: providerCode.trim(),
+        country: { iso2: country.trim().toUpperCase(), isActive: true },
+        method: { isActive: true },
+        aggregator: {
+          isActive: true,
+          ...(aggregator ? { code: aggregator } : { code: { in: ['netwalletpay', 'zikopay'] } }),
+        },
+        isActive: true,
+      },
+      include: {
+        country: { include: { currency: true } },
+        method: true,
+        aggregator: true,
+      },
+    });
+    if (!provider) {
+      throw new NotFoundException('Active payout provider not found for this country');
+    }
+    return provider;
+  }
+
+  private getAggregatorAdapter(code?: string | null) {
+    switch (code) {
+      case 'netwalletpay':
+        return this.netwalletpay;
+      case 'zikopay':
+        return this.zikopay;
+      default:
+        throw new BadRequestException(`Unsupported payout aggregator: ${code ?? 'unknown'}`);
+    }
+  }
+
+  private methodHintForProvider(providerCode: string, methodCode: string): string {
+    const provider = providerCode.toLowerCase();
+    const method = methodCode.toUpperCase();
+    if (method === 'BANK') return 'BANK';
+    if (method === 'CARD') return 'CARD';
+    if (provider.includes('orange')) return 'ORANGE';
+    return 'MOMO';
+  }
+
+  private buildProviderReference(): string {
+    return `INV-${Date.now()}`;
+  }
+
+  private parsePositiveAmount(value: number, field: string): Prisma.Decimal {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      throw new BadRequestException(`${field} must be greater than 0`);
+    }
+    return new Prisma.Decimal(numeric);
+  }
+
+  private calculateRefundSummary(transaction: {
+    amount: Prisma.Decimal;
+    fee: Prisma.Decimal | null;
+    netAmount: Prisma.Decimal | null;
+    refunds: Array<{ amount: Prisma.Decimal; status: TransactionStatus }>;
+  }) {
+    const zero = new Prisma.Decimal(0);
+    const amount = new Prisma.Decimal(transaction.amount);
+    const fee = transaction.fee ? new Prisma.Decimal(transaction.fee) : zero;
+    const net = transaction.netAmount
+      ? new Prisma.Decimal(transaction.netAmount)
+      : amount.sub(fee);
+    const maxRefundable = net.gt(zero) ? net : zero;
+    const refunded = transaction.refunds
+      .filter((refund) =>
+        refund.status === TransactionStatus.SUCCESS ||
+        refund.status === TransactionStatus.PROCESSING,
+      )
+      .reduce((sum, refund) => sum.add(refund.amount), zero);
+    const remaining = maxRefundable.sub(refunded);
+
+    return {
+      originalAmount: amount,
+      fee,
+      maxRefundable,
+      refunded,
+      remaining: remaining.gt(zero) ? remaining : zero,
+    };
+  }
+
+  private serializeRefundableInvoice(invoice: any, transaction: any, invoiceRefundLogs: any[]) {
+    const latestAttempt = invoice.attempts?.[0] ?? null;
+    const paidAttempt = invoice.attempts?.find((attempt: any) => attempt.status === TransactionStatus.SUCCESS) ?? latestAttempt;
+    const latestPayoutAttempt = invoice.payout?.attempts?.[0] ?? null;
+    const quote = invoice.quote ?? transaction?.quote ?? null;
+    const paidCurrency = quote?.baseCurrency ?? paidAttempt?.currency ?? transaction?.currency ?? invoice.currency;
+    const paidInSuccess =
+      invoice.status === TransactionStatus.SUCCESS ||
+      transaction?.status === TransactionStatus.SUCCESS ||
+      invoice.attempts?.some((attempt: any) => attempt.status === TransactionStatus.SUCCESS);
+    const payoutStatus = invoice.payout?.status ?? null;
+    const payoutFailed =
+      payoutStatus === TransactionStatus.FAILED ||
+      payoutStatus === TransactionStatus.CANCELLED ||
+      latestPayoutAttempt?.status === TransactionStatus.FAILED ||
+      latestPayoutAttempt?.status === TransactionStatus.CANCELLED;
+    const paidAmount = new Prisma.Decimal(this.numberValue(quote?.baseAmount ?? paidAttempt?.amount ?? transaction?.amount ?? invoice.amount) ?? 0);
+    const fee = new Prisma.Decimal(this.numberValue(quote?.fee ?? paidAttempt?.fee ?? transaction?.fee ?? 0) ?? 0);
+    const maxRefundable = paidAmount.sub(fee).gt(0) ? paidAmount.sub(fee) : new Prisma.Decimal(0);
+    const refunded = transaction
+      ? this.calculateRefundSummary(transaction).refunded
+      : invoiceRefundLogs
+          .filter((log) => {
+            const status = this.readMetadataString(log.metadata, 'status');
+            return status === TransactionStatus.SUCCESS || status === TransactionStatus.PROCESSING;
+          })
+          .reduce((sum, log) => sum.add(this.readMetadataNumber(log.metadata, 'amount') ?? 0), new Prisma.Decimal(0));
+    const remaining = maxRefundable.sub(refunded);
+    const isRefundable = Boolean(paidInSuccess && payoutFailed && remaining.gt(0));
+    const metadata = transaction
+      ? this.metadataObject(transaction.metadata)
+      : this.metadataObject(paidAttempt?.metadata);
+
+    return {
+      id: transaction?.id ?? invoice.id,
+      invoiceId: invoice.id,
+      reference: invoice.reference,
+      externalRef: paidAttempt?.externalRef ?? transaction?.externalRef ?? null,
+      status: invoice.status,
+      paymentStatus: paidAttempt?.status ?? null,
+      payoutStatus: payoutStatus ?? latestPayoutAttempt?.status ?? null,
+      eligibilityStatus: payoutFailed ? 'PAYOUT_FAILED' : invoice.status === TransactionStatus.SUCCESS ? 'COMPLETED' : paidInSuccess ? 'PAID_IN' : 'NOT_PAID',
+      isRefundable,
+      amount: Number(paidAmount),
+      fee: Number(fee),
+      maxRefundable: Number(maxRefundable),
+      refundedAmount: Number(refunded),
+      remainingRefundable: Number(remaining.gt(0) ? remaining : new Prisma.Decimal(0)),
+      refundStatus: typeof metadata.refundStatus === 'string' ? metadata.refundStatus : null,
+      currency: { code: paidCurrency?.code ?? invoice.currency?.code, symbol: paidCurrency?.symbol ?? null },
+      user: invoice.createdBy ?? transaction?.user ?? null,
+      recipient: {
+        user: invoice.recipient ?? null,
+        name: invoice.recipientName,
+        phone: invoice.recipientPhone,
+      },
+      payment: paidAttempt
+        ? {
+            status: paidAttempt.status,
+            method: paidAttempt.method,
+            provider: paidAttempt.provider,
+            externalRef: paidAttempt.externalRef,
+            amount: this.numberValue(paidAttempt.amount),
+            currency: paidAttempt.currency ? { code: paidAttempt.currency.code, symbol: paidAttempt.currency.symbol ?? null } : null,
+            instrument: this.paymentInstrumentFromAttempt(paidAttempt),
+          }
+        : null,
+      payout: invoice.payout
+        ? {
+            status: invoice.payout.status,
+            amount: this.numberValue(invoice.payout.amount),
+            currency: invoice.payout.currency,
+            method: invoice.payout.method,
+            provider: latestPayoutAttempt?.provider ?? invoice.payoutMethod,
+            providerCode: invoice.payoutProviderCode,
+            phone: invoice.recipientPhone,
+            country: invoice.country,
+            externalRef: latestPayoutAttempt?.externalRef ?? null,
+          }
+        : {
+            status: null,
+            amount: this.numberValue(quote?.targetAmount ?? invoice.amount),
+            currency: invoice.currency?.code,
+            method: invoice.payoutMethod,
+            provider: invoice.payoutMethod,
+            providerCode: invoice.payoutProviderCode,
+            phone: invoice.recipientPhone,
+            country: invoice.country,
+            externalRef: null,
+          },
+      createdAt: invoice.createdAt,
+    };
+  }
+
+  private serializeRefundableTransaction(transaction: {
+    id: string;
+    reference: string;
+    externalRef: string | null;
+    amount: Prisma.Decimal;
+    fee: Prisma.Decimal | null;
+    netAmount: Prisma.Decimal | null;
+    status: TransactionStatus;
+    createdAt: Date;
+    currency: { code: string; symbol: string | null };
+    user?: { id: string; firstName: string; lastName: string } | null;
+    refunds: Array<{ amount: Prisma.Decimal; status: TransactionStatus }>;
+    metadata?: Prisma.JsonValue | null;
+  }) {
+    const summary = this.calculateRefundSummary(transaction);
+    const metadata = this.metadataObject(transaction.metadata);
+
+    return {
+      id: transaction.id,
+      reference: transaction.reference,
+      externalRef: transaction.externalRef,
+      status: transaction.status,
+      amount: Number(summary.originalAmount),
+      fee: Number(summary.fee),
+      maxRefundable: Number(summary.maxRefundable),
+      refundedAmount: Number(summary.refunded),
+      remainingRefundable: Number(summary.remaining),
+      refundStatus: typeof metadata.refundStatus === 'string' ? metadata.refundStatus : null,
+      currency: transaction.currency,
+      user: transaction.user ?? null,
+      createdAt: transaction.createdAt,
+    };
+  }
+
+  private metadataObject(metadata: Prisma.JsonValue | null | undefined): Record<string, unknown> {
+    if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+      return { ...(metadata as Record<string, unknown>) };
+    }
+    return {};
+  }
+
+  private readMetadataString(metadata: Prisma.JsonValue | null | undefined, key: string) {
+    const value = this.metadataObject(metadata)[key];
+    return typeof value === 'string' ? value : null;
+  }
+
+  private readMetadataNumber(metadata: Prisma.JsonValue | null | undefined, key: string) {
+    const value = this.metadataObject(metadata)[key];
+    return typeof value === 'number' ? value : null;
   }
 
   // ── Bootstrap (create first admin) ───────────────────────────────────────

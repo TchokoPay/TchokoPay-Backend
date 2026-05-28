@@ -173,7 +173,16 @@ export class ZikoPayProvider implements PaymentProvider {
       const txRef = (response?.data as any)?.reference as string | undefined;
       this.logger.log(`✅ ZikoPay PAYIN accepted — ref: ${txRef}`);
 
-      return { status: 'SUCCESS', transactionId: txRef, provider: providerName };
+      return {
+        status: 'SUCCESS',
+        transactionId: txRef,
+        provider: providerName,
+        providerCode: operatorCode,
+        method,
+        country,
+        phone,
+        formattedPhone,
+      };
     } catch (err) {
       this.logger.error(`❌ ZikoPay PAYIN failed: ${(err as Error).message}`);
       return { status: 'FAILED', error: (err as Error).message };
