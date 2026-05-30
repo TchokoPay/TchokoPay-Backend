@@ -126,6 +126,133 @@ function renderShell(input: TemplateInput) {
   return { html, text };
 }
 
+function formatAmountNumber(amount: number) {
+  if (!Number.isFinite(amount)) return '0';
+
+  return new Intl.NumberFormat('en', {
+    maximumFractionDigits: 8,
+  }).format(amount);
+}
+
+function titleCase(value: string) {
+  return (value || 'TchokoPay')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function renderTransactionShell(input: {
+  logoUrl: string;
+  title: string;
+  preheader: string;
+  statusLabel: string;
+  statusTone: 'success' | 'danger';
+  amount: number;
+  currency: string;
+  headline: string;
+  message: string;
+  supportMessage: string;
+  reference: string;
+  ctaLabel: string;
+  ctaUrl: string;
+  footer?: string;
+}) {
+  const amount = formatAmountNumber(input.amount);
+  const currency = input.currency?.trim().toUpperCase() || 'XAF';
+  const fontFamily = "'Sora', Inter, Arial, sans-serif";
+  const tone =
+    input.statusTone === 'success'
+      ? {
+          bg: '#ecfdf5',
+          border: '#bbf7d0',
+          text: '#047857',
+        }
+      : {
+          bg: '#fff1f2',
+          border: '#fecdd3',
+          text: '#be123c',
+        };
+  const footer =
+    input.footer ??
+    'TchokoPay sends transaction emails so you can track payments and payouts with confidence.';
+
+  const html = `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>${escapeHtml(input.title)}</title>
+        <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+      </head>
+      <body style="margin:0;background:#f8fafc;font-family:${fontFamily};">
+        <div style="display:none;max-height:0;overflow:hidden;opacity:0;">${escapeHtml(input.preheader)}</div>
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f8fafc;padding:24px 12px;font-family:${fontFamily};">
+          <tr>
+            <td align="center">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border-radius:24px;overflow:hidden;border:1px solid #e2e8f0;font-family:${fontFamily};">
+                <tr>
+                  <td align="center" style="padding:30px 24px 18px;background:#0f172a;">
+                    <img src="${escapeHtml(input.logoUrl)}" alt="TchokoPay" width="48" height="48" style="display:block;width:48px;height:48px;border-radius:14px;margin:0 auto;" />
+                    <div style="margin-top:14px;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#cbd5e1;">TchokoPay</div>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:34px 28px 32px;">
+                    <span style="display:inline-block;border-radius:999px;background:${tone.bg};border:1px solid ${tone.border};color:${tone.text};font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:8px 12px;">${escapeHtml(input.statusLabel)}</span>
+
+                    <div style="margin:24px auto 0;max-width:460px;text-align:center;">
+                      <div style="color:#0f172a;font-size:66px;line-height:1;font-weight:800;letter-spacing:0;text-align:center;word-break:break-word;">${escapeHtml(amount)}</div>
+                      <div style="margin-top:8px;color:#64748b;font-size:18px;line-height:1.2;font-weight:800;letter-spacing:.14em;text-transform:uppercase;text-align:center;">${escapeHtml(currency)}</div>
+                    </div>
+                    <h1 style="margin:18px 0 0;color:#0f172a;font-size:24px;line-height:1.3;font-weight:700;text-align:center;">${escapeHtml(input.headline)}</h1>
+
+                    <p style="margin:22px auto 0;max-width:430px;color:#475569;font-size:15px;line-height:1.75;text-align:center;">${escapeHtml(input.message)}</p>
+
+                    <p style="margin:12px auto 0;max-width:430px;color:#64748b;font-size:13px;line-height:1.7;text-align:center;">${escapeHtml(input.supportMessage)}</p>
+
+                    <div style="margin:24px auto 0;max-width:360px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0;padding:14px 16px;">
+                      <div style="color:#64748b;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;">Transaction ID</div>
+                      <div style="margin-top:6px;color:#0f172a;font-size:14px;font-weight:700;letter-spacing:0;word-break:break-word;">${escapeHtml(input.reference)}</div>
+                    </div>
+
+                    <div style="margin:28px 0 0;">
+                      <a href="${escapeHtml(input.ctaUrl)}" style="display:inline-block;background:#0f172a;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:999px;font-size:14px;font-weight:700;">${escapeHtml(input.ctaLabel)}</a>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:18px 28px 28px;border-top:1px solid #e2e8f0;">
+                    <p style="margin:0;color:#64748b;font-size:12px;line-height:1.7;text-align:center;">${escapeHtml(footer)}</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+  `;
+
+  const text = [
+    `TchokoPay - ${input.title}`,
+    '',
+    `${amount} ${currency}`,
+    input.headline,
+    '',
+    input.message,
+    input.supportMessage,
+    '',
+    `Transaction ID: ${input.reference}`,
+    '',
+    `${input.ctaLabel}: ${input.ctaUrl}`,
+    '',
+    footer,
+  ].join('\n');
+
+  return { html, text };
+}
+
 export function renderOtpEmail(input: {
   logoUrl: string;
   firstName?: string | null;
@@ -337,6 +464,80 @@ export function renderPrimaryPayoutChangedEmail(input: {
     ],
     ctaLabel: 'Review payout settings',
     ctaUrl: `${input.dashboardUrl}/account`,
+  });
+
+  return { subject, ...content };
+}
+
+export function renderTransactionSuccessfulEmail(input: {
+  logoUrl: string;
+  firstName?: string | null;
+  reference: string;
+  amount: number;
+  currency: string;
+  paymentMethod: string;
+  payoutMethod: string;
+  dashboardUrl: string;
+}): EmailTemplate {
+  const subject = `${formatAmountNumber(input.amount)} ${input.currency?.trim().toUpperCase() || 'XAF'} sent successfully`;
+  const message = input.firstName
+    ? `${input.firstName}, your payment has been completed successfully.`
+    : 'Your payment has been completed successfully.';
+  const content = renderTransactionShell({
+    logoUrl: input.logoUrl,
+    title: 'Payment successful',
+    preheader: `Payment successful. Transaction ID: ${input.reference}.`,
+    statusLabel: 'Payment successful',
+    statusTone: 'success',
+    amount: input.amount,
+    currency: input.currency,
+    headline: 'sent successfully',
+    message,
+    supportMessage: `The payment was funded through ${titleCase(input.paymentMethod)} and delivered through ${titleCase(input.payoutMethod)}.`,
+    reference: input.reference,
+    ctaLabel: 'View transaction',
+    ctaUrl: `${input.dashboardUrl}/transactions`,
+    footer:
+      'TchokoPay sends transaction emails so you can track payments and payouts with confidence.',
+  });
+
+  return { subject, ...content };
+}
+
+export function renderTransactionFailedEmail(input: {
+  logoUrl: string;
+  firstName?: string | null;
+  reference: string;
+  amount: number;
+  currency: string;
+  paymentMethod: string;
+  payoutMethod: string;
+  failureReason?: string | null;
+  dashboardUrl: string;
+}): EmailTemplate {
+  const subject = 'We could not complete your TchokoPay transaction';
+  const message = input.firstName
+    ? `${input.firstName}, we could not complete this payment.`
+    : 'We could not complete this payment.';
+  const supportMessage = input.failureReason
+    ? `Please open your dashboard to request a refund review. Reason from the payment rail: ${input.failureReason}`
+    : 'Please open your dashboard to request a refund review using this transaction ID.';
+  const content = renderTransactionShell({
+    logoUrl: input.logoUrl,
+    title: 'Payment needs attention',
+    preheader: `Payment failed. Transaction ID: ${input.reference}.`,
+    statusLabel: 'Payment failed',
+    statusTone: 'danger',
+    amount: input.amount,
+    currency: input.currency,
+    headline: 'not completed',
+    message,
+    supportMessage,
+    reference: input.reference,
+    ctaLabel: 'Open dashboard',
+    ctaUrl: `${input.dashboardUrl}/transactions`,
+    footer:
+      'TchokoPay sends transaction emails so you can track payments and payouts with confidence.',
   });
 
   return { subject, ...content };

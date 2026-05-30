@@ -13,6 +13,8 @@ import {
   renderPasswordChangedEmail,
   renderPayoutRouteVerifiedEmail,
   renderPrimaryPayoutChangedEmail,
+  renderTransactionFailedEmail,
+  renderTransactionSuccessfulEmail,
   renderWelcomeEmail,
 } from './email.templates.js';
 
@@ -218,6 +220,59 @@ export class EmailService {
       html: template.html,
       text: template.text,
       tags: [{ name: 'category', value: 'payouts' }],
+    });
+
+    return true;
+  }
+
+  async sendTransactionStatusNotice(input: {
+    userId: string;
+    status: 'SUCCESS' | 'FAILED';
+    reference: string;
+    amount: number;
+    currency: string;
+    paymentMethod: string;
+    payoutMethod: string;
+    failureReason?: string | null;
+  }) {
+    const recipient = await this.getPrimaryEmailRecipient(input.userId);
+    if (!recipient) return false;
+
+    const dashboardUrl = `${this.getAppUrl()}/dashboard`;
+    const template =
+      input.status === 'SUCCESS'
+        ? renderTransactionSuccessfulEmail({
+            logoUrl: this.getLogoUrl(),
+            firstName: recipient.firstName,
+            reference: input.reference,
+            amount: input.amount,
+            currency: input.currency,
+            paymentMethod: input.paymentMethod,
+            payoutMethod: input.payoutMethod,
+            dashboardUrl,
+          })
+        : renderTransactionFailedEmail({
+            logoUrl: this.getLogoUrl(),
+            firstName: recipient.firstName,
+            reference: input.reference,
+            amount: input.amount,
+            currency: input.currency,
+            paymentMethod: input.paymentMethod,
+            payoutMethod: input.payoutMethod,
+            failureReason: input.failureReason,
+            dashboardUrl,
+          });
+
+    await this.sendEmail({
+      to: recipient.email,
+      subject: template.subject,
+      html: template.html,
+      text: template.text,
+      tags: [
+        { name: 'category', value: 'transactions' },
+        { name: 'status', value: input.status.toLowerCase() },
+        { name: 'reference', value: input.reference.slice(0, 190) },
+      ],
     });
 
     return true;

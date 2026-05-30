@@ -331,6 +331,24 @@ export class ProcessPaymentUseCase {
           where: { id: invoice.id },
           data: { status: TransactionStatus.FAILED },
         });
+
+        this.paymentEventService.emitPaymentComplete({
+          invoiceId: invoice.id,
+          invoiceReference: invoice.reference,
+          status: 'FAILED',
+          stage: 'FAILED',
+          paymentMethod: invoice.paymentMethod,
+          payoutMethod: invoice.payoutMethod,
+          amount: Number(quote.baseAmount),
+          currency: quote.baseCurrency.code,
+          paymentDetails: {
+            status: 'FAILED',
+            failureReason: payinResponse?.error || 'Provider returned FAILED',
+          },
+          timestamp: new Date(),
+          userId: isGuest ? undefined : userId,
+        });
+
         return {
           message: 'Payment failed',
           invoice: { ...invoice, status: TransactionStatus.FAILED },

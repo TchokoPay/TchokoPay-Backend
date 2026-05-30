@@ -25,11 +25,13 @@ export interface PaymentCompleteEvent {
     expiresAt?: string;
     address?: string;
     paymentHash?: string;
+    failureReason?: string;
   };
   payoutDetails?: {
     status: string;
     transactionId?: string;
     reference?: string;
+    failureReason?: string;
   };
   timestamp: Date;
   userId?: string;

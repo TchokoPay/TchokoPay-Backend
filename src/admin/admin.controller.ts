@@ -172,6 +172,24 @@ export class AdminController {
     }, req.ip);
   }
 
+  @Post('refunds/declare')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark a refundable payment as already refunded without triggering a provider payout' })
+  declareRefunded(@Req() req: AuthenticatedRequest, @Body() dto: Record<string, unknown>) {
+    const amount = dto.amount == null || dto.amount === '' ? undefined : Number(dto.amount);
+    if (!dto.reference) {
+      throw new BadRequestException('reference is required');
+    }
+    if (amount !== undefined && !Number.isFinite(amount)) {
+      throw new BadRequestException('amount must be a valid number');
+    }
+    return this.admin.declareRefunded(req.user.userId, {
+      reference: String(dto.reference),
+      amount,
+      note: dto.note == null ? undefined : String(dto.note),
+    }, req.ip);
+  }
+
   @Get('withdrawals')
   @ApiOperation({ summary: 'List admin withdrawal audit records' })
   listWithdrawals(

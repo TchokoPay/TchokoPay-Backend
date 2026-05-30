@@ -318,10 +318,14 @@ export class AdminService {
       },
     });
 
-    return this.serializeInvoiceDetail(inv, transaction);
+    const invoiceRefundLogs = await this.prisma.adminAuditLog.findMany({
+      where: { action: 'ADMIN_REFUND', targetType: 'INVOICE', targetId: inv.reference },
+    });
+
+    return this.serializeInvoiceDetail(inv, transaction, invoiceRefundLogs);
   }
 
-  private serializeInvoiceDetail(inv: any, transaction: any) {
+  private serializeInvoiceDetail(inv: any, transaction: any, invoiceRefundLogs: any[] = []) {
     const latestAttempt = inv.attempts?.[0] ?? null;
     const latestPayoutAttempt = inv.payout?.attempts?.[0] ?? null;
     const quote = inv.quote ?? transaction?.quote ?? null;
@@ -334,6 +338,7 @@ export class AdminService {
     const successfulRefunds = transaction?.refunds?.filter((refund: any) => refund.status === TransactionStatus.SUCCESS) ?? [];
     const refundedAmount = successfulRefunds.reduce((sum: number, refund: any) => sum + (this.numberValue(refund.amount) ?? 0), 0);
     const paymentInstrument = this.paymentInstrumentFromAttempt(latestAttempt);
+    const refundCandidate = this.serializeRefundableInvoice(inv, transaction, invoiceRefundLogs);
 
     return {
       id: inv.id,
@@ -472,6 +477,28 @@ export class AdminService {
             expiresAt: inv.paymentLink.expiresAt,
           }
         : null,
+      refund: {
+        isRefundable: refundCandidate.isRefundable,
+        eligibilityStatus: refundCandidate.eligibilityStatus,
+        maxRefundable: refundCandidate.maxRefundable,
+        refundedAmount: refundCandidate.refundedAmount,
+        remainingRefundable: refundCandidate.remainingRefundable,
+        refundStatus: refundCandidate.refundStatus,
+        currency: refundCandidate.currency,
+        suggestedPhone:
+          refundCandidate.payment?.instrument?.phone
+          ?? refundCandidate.payment?.instrument?.account
+          ?? null,
+        suggestedCountry:
+          refundCandidate.payment?.instrument?.country
+          ?? refundCandidate.payout?.country
+          ?? inv.country
+          ?? null,
+        suggestedProviderCode:
+          refundCandidate.payment?.instrument?.providerCode
+          ?? refundCandidate.payout?.providerCode
+          ?? null,
+      },
     };
   }
 
@@ -1695,6 +1722,234 @@ export class AdminService {
         message: ok ? 'Refund payout accepted' : (payout.result.error ?? 'Refund payout failed'),
         raw: payout.result,
       },
+    };
+  }
+
+  async declareRefunded(
+    adminId: string,
+    dto: {
+      reference: string;
+      amount?: number;
+      note?: string;
+    },
+    ip?: string,
+  ) {
+    const transactionKey = dto.reference?.trim();
+    if (!transactionKey) throw new BadRequestException('reference is required');
+
+    const invoice = await this.prisma.paymentInvoice.findFirst({
+      where: {
+        OR: [
+          { id: transactionKey },
+          { reference: transactionKey },
+          { attempts: { some: { externalRef: transactionKey } } },
+        ],
+      },
+      include: {
+        currency: { select: { code: true, symbol: true, name: true } },
+        quote: { include: { baseCurrency: true, targetCurrency: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        recipient: { select: { id: true, firstName: true, lastName: true } },
+        attempts: { orderBy: { createdAt: 'desc' }, include: { currency: true } },
+        payout: { include: { attempts: { orderBy: { createdAt: 'desc' } } } },
+      },
+    });
+
+    const transaction = await this.prisma.transaction.findFirst({
+      where: {
+        OR: [
+          { id: transactionKey },
+          { reference: transactionKey },
+          { externalRef: transactionKey },
+          ...(invoice ? [{ reference: invoice.reference }] : []),
+        ],
+      },
+      include: {
+        currency: { select: { code: true, symbol: true } },
+        refunds: true,
+        user: { select: { id: true, firstName: true, lastName: true } },
+      },
+    });
+
+    if (!invoice && !transaction) throw new NotFoundException('Transaction not found');
+
+    if (invoice) {
+      const invoiceRefundLogs = await this.prisma.adminAuditLog.findMany({
+        where: { action: 'ADMIN_REFUND', targetType: 'INVOICE', targetId: invoice.reference },
+      });
+      const candidate = this.serializeRefundableInvoice(invoice, transaction, invoiceRefundLogs);
+      if (!candidate.isRefundable) {
+        throw new BadRequestException('Only payments with successful pay-in and failed payout can be declared refunded');
+      }
+
+      const amount = dto.amount == null
+        ? new Prisma.Decimal(candidate.remainingRefundable)
+        : this.parsePositiveAmount(dto.amount, 'amount');
+      if (amount.gt(candidate.remainingRefundable)) {
+        throw new BadRequestException(
+          `Refund exceeds available amount. Max refundable is ${candidate.remainingRefundable} ${candidate.currency.code}`,
+        );
+      }
+
+      const providerCode = candidate.payment?.instrument?.providerCode
+        ?? candidate.payment?.provider
+        ?? 'manual';
+      const refund = transaction
+        ? await this.prisma.refund.create({
+            data: {
+              transaction: { connect: { id: transaction.id } },
+              amount,
+              reason: dto.note?.trim() || 'Marked refunded by admin',
+              status: TransactionStatus.SUCCESS,
+              provider: providerCode,
+            },
+          })
+        : null;
+
+      const refundedAmount = new Prisma.Decimal(candidate.refundedAmount).add(amount);
+      const refundStatus = refundedAmount.gte(candidate.maxRefundable) ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+      const timestamp = new Date().toISOString();
+
+      if (transaction) {
+        const metadata = this.metadataObject(transaction.metadata);
+        metadata.refundStatus = refundStatus;
+        metadata.refundedAmount = Number(refundedAmount);
+        metadata.refundableAmount = candidate.maxRefundable;
+        metadata.lastRefundId = refund?.id ?? invoice.reference;
+        metadata.lastRefundAt = timestamp;
+        metadata.lastRefundMode = 'DECLARED';
+
+        await this.prisma.transaction.update({
+          where: { id: transaction.id },
+          data: { metadata },
+        });
+      } else {
+        const paidAttempt = invoice.attempts.find((attempt: any) => attempt.status === TransactionStatus.SUCCESS) ?? invoice.attempts[0];
+        if (paidAttempt) {
+          const metadata = this.metadataObject(paidAttempt.metadata);
+          metadata.refundStatus = refundStatus;
+          metadata.refundedAmount = Number(refundedAmount);
+          metadata.refundableAmount = candidate.maxRefundable;
+          metadata.lastRefundReference = invoice.reference;
+          metadata.lastRefundAt = timestamp;
+          metadata.lastRefundMode = 'DECLARED';
+          await this.prisma.paymentAttempt.update({
+            where: { id: paidAttempt.id },
+            data: { metadata },
+          });
+        }
+      }
+
+      await this.log(adminId, 'ADMIN_REFUND', refund ? 'REFUND' : 'INVOICE', refund?.id ?? invoice.reference, {
+        status: TransactionStatus.SUCCESS,
+        declared: true,
+        invoiceId: invoice.id,
+        invoiceReference: invoice.reference,
+        transactionId: transaction?.id ?? null,
+        refundId: refund?.id ?? null,
+        amount: Number(amount),
+        currency: candidate.currency.code,
+        originalCurrency: candidate.currency.code,
+        country: candidate.payment?.instrument?.country ?? invoice.country,
+        phone: candidate.payment?.instrument?.phone ?? candidate.payment?.instrument?.account ?? null,
+        providerCode,
+        message: dto.note?.trim() || 'Refund marked as completed by admin',
+      }, ip);
+
+      const remaining = new Prisma.Decimal(candidate.maxRefundable).sub(refundedAmount);
+      return {
+        ok: true,
+        declared: true,
+        status: TransactionStatus.SUCCESS,
+        message: 'Refund marked as completed',
+        refund: {
+          id: refund?.id ?? invoice.reference,
+          transactionId: refund?.transactionId ?? transaction?.id ?? invoice.id,
+          amount: Number(amount),
+          reason: dto.note?.trim() || 'Marked refunded by admin',
+          status: TransactionStatus.SUCCESS,
+          provider: providerCode,
+          externalRef: null,
+          createdAt: refund?.createdAt ?? new Date(),
+        },
+        transaction: {
+          ...candidate,
+          refundedAmount: Number(refundedAmount),
+          remainingRefundable: Number(remaining.gt(0) ? remaining : new Prisma.Decimal(0)),
+          refundStatus,
+        },
+      };
+    }
+
+    if (!transaction || transaction.status !== TransactionStatus.SUCCESS) {
+      throw new BadRequestException('Only successful transactions can be declared refunded');
+    }
+
+    const refundSummary = this.calculateRefundSummary(transaction);
+    const amount = dto.amount == null
+      ? refundSummary.remaining
+      : this.parsePositiveAmount(dto.amount, 'amount');
+    if (amount.gt(refundSummary.remaining)) {
+      throw new BadRequestException(
+        `Refund exceeds available amount. Max refundable is ${refundSummary.remaining.toString()} ${transaction.currency.code}`,
+      );
+    }
+
+    const refund = await this.prisma.refund.create({
+      data: {
+        transaction: { connect: { id: transaction.id } },
+        amount,
+        reason: dto.note?.trim() || 'Marked refunded by admin',
+        status: TransactionStatus.SUCCESS,
+        provider: 'manual',
+      },
+    });
+
+    const refundedAmount = refundSummary.refunded.add(amount);
+    const refundStatus = refundedAmount.gte(refundSummary.maxRefundable) ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+    const metadata = this.metadataObject(transaction.metadata);
+    metadata.refundStatus = refundStatus;
+    metadata.refundedAmount = Number(refundedAmount);
+    metadata.refundableAmount = Number(refundSummary.maxRefundable);
+    metadata.lastRefundId = refund.id;
+    metadata.lastRefundAt = new Date().toISOString();
+    metadata.lastRefundMode = 'DECLARED';
+
+    await this.prisma.transaction.update({
+      where: { id: transaction.id },
+      data: { metadata },
+    });
+
+    await this.log(adminId, 'ADMIN_REFUND', 'REFUND', refund.id, {
+      status: TransactionStatus.SUCCESS,
+      declared: true,
+      transactionId: transaction.id,
+      transactionReference: transaction.reference,
+      amount: Number(amount),
+      currency: transaction.currency.code,
+      providerCode: 'manual',
+      message: dto.note?.trim() || 'Refund marked as completed by admin',
+    }, ip);
+
+    return {
+      ok: true,
+      declared: true,
+      status: TransactionStatus.SUCCESS,
+      message: 'Refund marked as completed',
+      refund: {
+        id: refund.id,
+        transactionId: refund.transactionId,
+        amount: Number(refund.amount),
+        reason: refund.reason,
+        status: refund.status,
+        provider: refund.provider,
+        externalRef: refund.externalRef,
+        createdAt: refund.createdAt,
+      },
+      transaction: this.serializeRefundableTransaction({
+        ...transaction,
+        refunds: [...transaction.refunds, refund],
+      }),
     };
   }
 

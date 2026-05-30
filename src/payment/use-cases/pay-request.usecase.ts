@@ -166,6 +166,23 @@ export class PayRequestUseCase {
         });
       }
 
+      this.paymentEventService.emitPaymentComplete({
+        invoiceId: invoice.id,
+        invoiceReference: invoice.reference,
+        status: 'FAILED',
+        stage: 'FAILED',
+        paymentMethod,
+        payoutMethod: invoice.payoutMethod,
+        amount: Number(quote.baseAmount),
+        currency: quote.baseCurrency.code,
+        paymentDetails: {
+          status: 'FAILED',
+          failureReason: payinResponse?.error || 'Provider returned FAILED',
+        },
+        timestamp: new Date(),
+        userId: isGuest ? undefined : userId,
+      });
+
       return {
         message: 'Payment failed',
         invoice: { ...invoice, status: TransactionStatus.FAILED },
