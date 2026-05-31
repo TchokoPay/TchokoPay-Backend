@@ -35,12 +35,29 @@ export class PayRequestUseCase {
       throw new NotFoundException('Invoice not found');
     }
 
-    if (invoice.status !== TransactionStatus.PENDING) {
-      throw new BadRequestException('Invoice is not pending');
+    if (invoice.flow !== FlowType.REQUEST) {
+      throw new BadRequestException('Invalid payment request');
     }
 
-    if (new Date() > invoice.expiresAt) {
-      throw new BadRequestException('Invoice has expired');
+    if (invoice.status === TransactionStatus.SUCCESS) {
+      throw new BadRequestException('Payment request has already been paid');
+    }
+
+    if (
+      (invoice.status === TransactionStatus.PENDING ||
+        invoice.status === TransactionStatus.PROCESSING) &&
+      new Date() > invoice.expiresAt
+    ) {
+      await this.expireRequestInvoice(invoice.id);
+      throw new BadRequestException('Payment request has expired');
+    }
+
+    if (invoice.status === TransactionStatus.PROCESSING) {
+      throw new BadRequestException('Payment request is already being processed');
+    }
+
+    if (invoice.status !== TransactionStatus.PENDING) {
+      throw new BadRequestException('Payment request is no longer available');
     }
 
     const isGuest = !userId?.trim();
@@ -49,26 +66,16 @@ export class PayRequestUseCase {
 
     let payerPhone: string | undefined;
     if (requiresPayerPhone) {
-      if (isGuest) {
-        if (!dto.payerPhone) {
-          throw new BadRequestException(
-            `Guest ${paymentMethod} payments require a payerPhone. Please provide your mobile money number.`,
-          );
-        }
-        payerPhone = dto.payerPhone as string;
-      } else {
-        const payerContact = await this.prisma.userContact.findFirst({
-          where: { userId, type: 'PHONE', isVerified: true },
-        });
+      const submittedPayerPhone =
+        typeof dto.payerPhone === 'string' ? dto.payerPhone.trim() : '';
 
-        if (!payerContact && !dto.payerPhone) {
-          throw new BadRequestException(
-            `No verified phone found. Please verify your phone in settings or provide payerPhone for ${paymentMethod} payment.`,
-          );
-        }
-
-        payerPhone = payerContact?.value ?? (dto.payerPhone as string | undefined);
+      if (!submittedPayerPhone) {
+        throw new BadRequestException(
+          `${paymentMethod} payments require the mobile money number entered in the payment form.`,
+        );
       }
+
+      payerPhone = submittedPayerPhone;
     }
 
     const paymentRequest = await this.prisma.paymentRequest.findFirst({
@@ -110,6 +117,13 @@ export class PayRequestUseCase {
       },
     });
 
+    if (paymentRequest) {
+      await this.prisma.paymentRequest.update({
+        where: { id: paymentRequest.id },
+        data: { status: TransactionStatus.PROCESSING },
+      });
+    }
+
     const attempt = await this.prisma.paymentAttempt.create({
       data: {
         invoice: { connect: { id: invoice.id } },
@@ -127,6 +141,10 @@ export class PayRequestUseCase {
       invoice.country;
 
     const payinProvider = this.providerFactory.getProvider(paymentMethod, payerCountry);
+    const paymentProviderCode =
+      typeof dto.paymentProviderCode === 'string' && dto.paymentProviderCode.trim()
+        ? dto.paymentProviderCode.trim()
+        : undefined;
     const payinResponse = await payinProvider.payin({
       amount: Number(quote.baseAmount),
       currency: quote.baseCurrency.code,
@@ -137,6 +155,7 @@ export class PayRequestUseCase {
         country: payerCountry,
         method: paymentMethod,
         type: 'COLLECTION',
+        providerCode: paymentProviderCode,
       },
     });
 
@@ -150,6 +169,7 @@ export class PayRequestUseCase {
           metadata: {
             payerPhone: payerPhone ?? null,
             payerCountry,
+            providerCode: paymentProviderCode ?? null,
             method: paymentMethod,
             type: 'COLLECTION',
           },
@@ -206,6 +226,7 @@ export class PayRequestUseCase {
         metadata: {
           payerPhone: payerPhone ?? null,
           payerCountry,
+          providerCode: paymentProviderCode ?? null,
           method: paymentMethod,
           type: 'COLLECTION',
         },
@@ -263,5 +284,24 @@ export class PayRequestUseCase {
     return method.toUpperCase() === 'LIGHTNING' || method.toUpperCase() === 'BTC'
       ? 'blink'
       : 'netwalletpay';
+  }
+
+  private async expireRequestInvoice(invoiceId: string) {
+    await this.prisma.$transaction([
+      this.prisma.paymentInvoice.update({
+        where: { id: invoiceId },
+        data: { status: TransactionStatus.CANCELLED },
+      }),
+      this.prisma.paymentRequest.updateMany({
+        where: {
+          metadata: { path: ['invoiceId'], equals: invoiceId },
+        },
+        data: { status: TransactionStatus.CANCELLED },
+      }),
+      this.prisma.paymentLink.updateMany({
+        where: { invoiceId },
+        data: { isActive: false },
+      }),
+    ]);
   }
 }

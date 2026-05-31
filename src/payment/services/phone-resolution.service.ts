@@ -18,7 +18,7 @@ export class PhoneResolutionService {
 
   /**
    * Resolve payer phone based on payment method and user type
-   * - MOMO/Orange: REQUIRES phone (registered: auto-fetch, unregistered: must provide)
+   * - MOMO/Orange: REQUIRES the phone submitted with this payment
    * - Lightning/BTC: NO phone needed (invoice-based)
    * - BANK/CARD: NO phone needed (card/bank account required, not phone)
    */

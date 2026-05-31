@@ -1,16 +1,15 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
-import { QuoteService } from '../../quote/quote.service.js';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { FlowType, PaymentAction } from '../enums/payment.enums.js';
 import { Prisma } from '@prisma/client';
-import { UserSettingsService } from '../../users/services/user-settings.service.js';
+
+const REQUEST_EXPIRY_DAYS = 7;
+const REQUEST_EXPIRY_MS = REQUEST_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class CreateRequestUseCase {
   constructor(
-    private quoteService: QuoteService,
     private prisma: PrismaService,
-    private userSettings: UserSettingsService,
   ) {}
 
   async execute(userId: string, dto: any) {
@@ -27,56 +26,38 @@ export class CreateRequestUseCase {
       throw new BadRequestException('amountType, amount, targetCurrency, and payoutMethod are required for request creation');
     }
 
-    // For REQUEST CREATE (MOMO payout only for now):
-    // - Registered user: auto-use verified phone, no payerPhone needed
-    // - Guest user: MUST provide payerPhone (their MOMO number for receiving)
-    const requestedReceivePhone = dto.recipientPhone || dto.payerPhone;
+    // The requester-entered settlement detail is the source of truth for now.
+    // Do not silently swap in saved payout contacts for authenticated users.
+    const requestedReceivePhone =
+      typeof dto.recipientPhone === 'string' && dto.recipientPhone.trim()
+        ? dto.recipientPhone.trim()
+        : typeof dto.payerPhone === 'string' && dto.payerPhone.trim()
+          ? dto.payerPhone.trim()
+          : null;
+    const payoutMethod = String(dto.payoutMethod).trim().toUpperCase();
 
-    if (dto.payoutMethod?.toUpperCase() === 'MOMO') {
-      // MOMO payout - check if registered user or guest
-      const isRegistered = userId && userId.trim().length > 0;
-      
-      if (!isRegistered && !requestedReceivePhone) {
-        throw new BadRequestException(
-          'For MOMO payout as guest user, a receive phone number is required',
-        );
-      }
+    if (['MOMO', 'ORANGE', 'BANK'].includes(payoutMethod) && !requestedReceivePhone) {
+      throw new BadRequestException(
+        'A receive phone or account number is required for this payment request',
+      );
     }
 
     // For REQUEST CREATE, we don't know baseCurrency yet - payer will choose payment method later
     // Create invoice with target details only, quote will be created when someone pays
 
-    const requester = await this.prisma.user.findUnique({ where: { id: userId } });
+    const requester = userId?.trim()
+      ? await this.prisma.user.findUnique({ where: { id: userId } })
+      : null;
 
-    let requesterPhone: string | null = null;
-    let requesterName: string = 'Guest User';
-    let payoutMethod = dto.payoutMethod;
-    let country = dto.country?.trim().toUpperCase() || 'CM';
-    let payoutProviderCode: string | null = null;
-
-    if (requester) {
-      const payoutSetting =
-        await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
-
-      if (!payoutSetting) {
-        throw new BadRequestException(
-          'Registered user must set and verify a primary payout number',
-        );
-      }
-
-      requesterPhone = payoutSetting.phone;
-      requesterName = `${requester.firstName} ${requester.lastName}`;
-      payoutMethod = payoutSetting.paymentMethod;
-      country = payoutSetting.country.iso2;
-      payoutProviderCode = payoutSetting.provider.providerCode;
-    } else {
-      // Guest user - use provided receive phone
-      if (!requestedReceivePhone) {
-        throw new BadRequestException('Guest users must provide a mobile money number to receive funds');
-      }
-      requesterPhone = requestedReceivePhone;
-      requesterName = 'Guest User';
-    }
+    const requesterPhone: string | null = requestedReceivePhone;
+    const requesterName: string = requester
+      ? `${requester.firstName} ${requester.lastName}`.trim() || 'TchokoPay User'
+      : 'Guest User';
+    const country = dto.country?.trim().toUpperCase() || 'CM';
+    const payoutProviderCode: string | null =
+      typeof dto.payoutProviderCode === 'string' && dto.payoutProviderCode.trim()
+        ? dto.payoutProviderCode.trim()
+        : null;
 
     // Get target currency for invoice
     const targetCurrency = await this.prisma.currency.findUnique({
@@ -96,6 +77,8 @@ export class CreateRequestUseCase {
       targetAmount = dto.amount;
     }
 
+    const expiresAt = new Date(Date.now() + REQUEST_EXPIRY_MS);
+
     const invoice = await this.prisma.paymentInvoice.create({
       data: {
         reference: `REQ-${Date.now()}`,
@@ -111,7 +94,7 @@ export class CreateRequestUseCase {
         recipient: requester ? { connect: { id: requester.id } } : undefined,
         recipientPhone: requesterPhone,
         recipientName: requesterName,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+        expiresAt,
       },
     });
 
@@ -126,7 +109,11 @@ export class CreateRequestUseCase {
             expiresAt: invoice.expiresAt,
             metadata: {
               amountType: dto.amountType,
-              payoutMethod: dto.payoutMethod,
+              country,
+              payoutMethod,
+              payoutProviderCode,
+              recipientPhone: requesterPhone,
+              expiresInDays: REQUEST_EXPIRY_DAYS,
               invoiceId: invoice.id,
               action: PaymentAction.CREATE,
             },

@@ -82,11 +82,10 @@ export class CreatePaymentDto {
 - Recipient creates invoice for payer to pay later
 - Creates an invoice with amount to RECEIVE (payer will PAY to settle it)
 - For now: MOMO payout only
-- Registered user: auto-uses verified phone, no payerPhone needed
-- Guest user: MUST provide payerPhone (your MOMO number to receive funds)
+- Registered and guest users must provide recipientPhone or payerPhone for the receive number/account
 - ❌ DO NOT include paymentMethod in REQUEST CREATE (payer chooses paymentMethod when paying)
 - Examples:
-  * Registered user (auto-uses verified MOMO):
+  * Registered user:
     {
       "flow": "REQUEST",
       "action": "CREATE",
@@ -94,7 +93,8 @@ export class CreatePaymentDto {
       "amountType": "RECEIVE",
       "targetCurrency": "XAF",
       "payoutMethod": "MOMO",
-      "description": "Invoice for shoes - valid for 24 hours"
+      "recipientPhone": "674567325",
+      "description": "Invoice for shoes - valid for 7 days"
     }
   * Guest user (MUST provide payerPhone to receive funds):
     {
@@ -113,8 +113,7 @@ export class CreatePaymentDto {
 - Payer specifies: baseCurrency (what they pay in) + paymentMethod (how they pay)
 - ❌ DO NOT include payoutMethod (payout method is locked in the invoice from when it was created)
 - Registered user with LIGHTNING/BTC: no phone needed
-- Registered user with MOMO: no phone needed (auto-resolved from verified contact)
-- Guest user with MOMO: MUST provide payerPhone (their MOMO number to send from)
+- Registered and guest users with MOMO/ORANGE: MUST provide payerPhone (the number to send from)
 - Examples:
   * Registered user paying with LIGHTNING:
     {
@@ -125,13 +124,14 @@ export class CreatePaymentDto {
       "paymentMethod": "LIGHTNING",
       "description": "Paying invoice"
     }
-  * Registered user paying with MOMO (no phone needed):
+  * Registered user paying with MOMO:
     {
       "flow": "REQUEST",
       "action": "PAY",
       "invoiceReference": "REQ-1774408197902",
       "baseCurrency": "XAF",
       "paymentMethod": "MOMO",
+      "payerPhone": "670333333",
       "description": "Paying invoice via registered MOMO"
     }
   * Guest user paying with MOMO (MUST provide payerPhone):
@@ -158,10 +158,10 @@ export class CreatePaymentDto {
     description: `Action for REQUEST flow:
 
 - **CREATE**: Recipient creates invoice (payer will pay later)
-  * **Registered user**: Auto-uses verified phone for MOMO payout
-    - ONLY provide: amount, amountType (RECEIVE), targetCurrency, payoutMethod (MOMO), description
+  * **Registered user**: Uses the receive number/account submitted in this request
+    - ONLY provide: amount, amountType (RECEIVE), targetCurrency, payoutMethod (MOMO), recipientPhone, description
     - ❌ DO NOT include paymentMethod (payer decides how to pay when settling invoice)
-    - Example: { "flow": "REQUEST", "action": "CREATE", "amount": 5000, "amountType": "RECEIVE", "targetCurrency": "XAF", "payoutMethod": "MOMO" }
+    - Example: { "flow": "REQUEST", "action": "CREATE", "amount": 5000, "amountType": "RECEIVE", "targetCurrency": "XAF", "payoutMethod": "MOMO", "recipientPhone": "674567325" }
   
   * **Guest user**: MUST provide payerPhone (your MOMO number to receive payment)
     - ONLY provide: amount, amountType (RECEIVE), targetCurrency, payoutMethod (MOMO), payerPhone, description
@@ -169,10 +169,10 @@ export class CreatePaymentDto {
     - Example: { "flow": "REQUEST", "action": "CREATE", "amount": 5000, "amountType": "RECEIVE", "targetCurrency": "XAF", "payoutMethod": "MOMO", "payerPhone": "674567325" }
 
 - **PAY**: Payer pays existing invoice by reference
-  * **Registered user**: Auto-resolves MOMO phone if verified
-    - ONLY provide: invoiceReference, baseCurrency, paymentMethod (LIGHTNING/MOMO), description
+  * **Registered user**: Must provide payerPhone when paying with MOMO/ORANGE
+    - ONLY provide: invoiceReference, baseCurrency, paymentMethod (LIGHTNING/MOMO), payerPhone, description
     - ❌ DO NOT include payoutMethod (payout method is locked in the invoice)
-    - Example: { "flow": "REQUEST", "action": "PAY", "invoiceReference": "REQ-123", "baseCurrency": "XAF", "paymentMethod": "MOMO" }
+    - Example: { "flow": "REQUEST", "action": "PAY", "invoiceReference": "REQ-123", "baseCurrency": "XAF", "paymentMethod": "MOMO", "payerPhone": "670333333" }
   
   * **Guest user**: MUST provide payerPhone if paying via MOMO
     - ONLY provide: invoiceReference, baseCurrency, paymentMethod, payerPhone, description
@@ -414,39 +414,32 @@ Error cases:
     example: '674567325',
     description: `Payer/Guest phone number (MOMO number to receive or send funds).
 
-⚠️  REQUIRED FOR REQUEST CREATE (GUEST USERS):
-When creating an invoice as a guest user, payerPhone is the MOMO number you want to receive payment on.
-Registered users automatically use their verified phone, no payerPhone needed.
+⚠️  REQUIRED FOR REQUEST CREATE WHEN USED AS RECEIVE DETAIL:
+When creating an invoice, payerPhone can be used as the MOMO number you want to receive payment on.
+recipientPhone is preferred for request creation, and saved payout settings are not used for this flow.
 
 Examples:
 REQUEST CREATE - Guest: { "flow": "REQUEST", "action": "CREATE", "amount": 50000, "amountType": "RECEIVE", "targetCurrency": "XAF", "payoutMethod": "MOMO", "payerPhone": "674567325" }
-REQUEST CREATE - Registered: { "flow": "REQUEST", "action": "CREATE", "amount": 50000, "amountType": "RECEIVE", "targetCurrency": "XAF", "payoutMethod": "MOMO" }
+REQUEST CREATE - Registered: { "flow": "REQUEST", "action": "CREATE", "amount": 50000, "amountType": "RECEIVE", "targetCurrency": "XAF", "payoutMethod": "MOMO", "recipientPhone": "674567325" }
 
 OTHER REQUIRED CASES:
 
-1. **DIRECT/QR - Guest paying via MOMO/ORANGE**
-   - Guest payer must provide their MOMO number to send from
+1. **DIRECT/QR - Paying via MOMO/ORANGE**
+   - Payer must provide the MOMO number entered in the payment form
    - Examples:
      * DIRECT MOMO (guest): payerPhone = "670111111", recipientPhone = "670000000"
      * QR MOMO (guest): payerPhone = "670222222", recipientHandle = "@alice"
 
-2. **DIRECT/QR - Registered user paying via MOMO WITHOUT verified phone**
-   - User account exists but phone not verified
-   - Mobile money provider requires phone confirmation
-   - payerPhone bypasses unverified phone validation
-
-3. **REQUEST PAY - Guest paying via MOMO**
-   - Guest payer must provide their MOMO number to send payment from
-   - Example: REQUEST PAY (guest MOMO): payerPhone = "670333333", invoiceReference = "REQ-123"
+2. **REQUEST PAY - Paying via MOMO/ORANGE**
+   - Payer must provide their MOMO number to send payment from
+   - Example: REQUEST PAY (MOMO): payerPhone = "670333333", invoiceReference = "REQ-123"
 
 OPTIONAL IN THESE CASES:
 - LIGHTNING payment (registered or guest) → phone for contact tracing only
-- Registered user with verified phone on account → auto-resolved from stored contact
-- Registered user paying via MOMO with verified phone → auto-resolved
 
 NOT NEEDED:
 - Registered user with crypto wallet paying via LIGHTNING/BTC
-- Registered user with verified phone creating REQUEST
+- Card/bank payments that do not require a sender phone
 
 Summary matrix:
 +──────────────┬────────────┬──────────────────┬──────────────────+
@@ -454,13 +447,12 @@ Summary matrix:
 +──────────────┼────────────┼──────────────────┼──────────────────+
 | DIRECT       | Guest      | MOMO             | ✓ REQUIRED       |
 | DIRECT       | Guest      | LIGHTNING        | Optional         |
-| DIRECT       | Registered | MOMO (no verify) | ✓ REQUIRED       |
-| DIRECT       | Registered | MOMO (verified)  | ✗ Not needed     |
+| DIRECT       | Registered | MOMO             | ✓ REQUIRED       |
 | QR           | Guest      | MOMO             | ✓ REQUIRED       |
 | REQUEST CREA | Guest      | MOMO             | ✓ REQUIRED       |
-| REQUEST CREA | Registered | MOMO             | ✗ Not needed     |
+| REQUEST CREA | Registered | MOMO             | ✓ REQUIRED       |
 | REQUEST PAY  | Guest      | MOMO             | ✓ REQUIRED       |
-| REQUEST PAY  | Registered | MOMO             | ✗ Not needed     |
+| REQUEST PAY  | Registered | MOMO             | ✓ REQUIRED       |
 +──────────────┴────────────┴──────────────────┴──────────────────+
 
 Service-level validation enforces these requirements. DTO allows optional for flexibility.
@@ -526,7 +518,7 @@ Reference format (Branded):
 Invoice lookup process:
 1. System finds invoice by reference (case-insensitive)
 2. Validates invoice NOT already paid (status = PENDING)
-3. Checks expiry time (defaults to 1 hour)
+3. Checks expiry time (payment requests are valid for 7 days)
 4. Returns quote embedded in invoice (amount, exchangeRate, fee)
 5. Proceeds with payment using invoice's original currency pair
 

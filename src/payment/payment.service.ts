@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { PaymentFlow, TransactionStatus } from '@prisma/client';
 import { FlowHelper } from './flows/flow.helper.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { NetwalletpayProvider } from './providers/netwalletpay.provider.js';
@@ -89,8 +90,9 @@ export class PaymentService {
   }
 
   async getInvoiceByReference(reference: string) {
+    const normalizedReference = reference.trim().toUpperCase();
     const invoice = await this.prisma.paymentInvoice.findUnique({
-      where: { reference },
+      where: { reference: normalizedReference },
       include: {
         currency: true,
         recipient: {
@@ -107,6 +109,77 @@ export class PaymentService {
       throw new NotFoundException('Invoice not found');
     }
 
-    return invoice;
+    const currentInvoice = await this.expireRequestInvoiceIfNeeded(invoice);
+    const requestState = this.getRequestState(currentInvoice);
+
+    return {
+      ...currentInvoice,
+      requestState,
+      isExpired: requestState === 'EXPIRED',
+      isPayable: requestState === 'PAYABLE',
+    };
+  }
+
+  private async expireRequestInvoiceIfNeeded(invoice: any) {
+    const isExpirableStatus =
+      invoice.status === TransactionStatus.PENDING ||
+      invoice.status === TransactionStatus.PROCESSING;
+    const isExpiredRequest =
+      invoice.flow === PaymentFlow.REQUEST &&
+      isExpirableStatus &&
+      new Date() > invoice.expiresAt;
+
+    if (!isExpiredRequest) {
+      return invoice;
+    }
+
+    const [updatedInvoice] = await this.prisma.$transaction([
+      this.prisma.paymentInvoice.update({
+        where: { id: invoice.id },
+        data: { status: TransactionStatus.CANCELLED },
+        include: {
+          currency: true,
+          recipient: {
+            select: { id: true, firstName: true, lastName: true, paymentIdentity: true },
+          },
+          paymentLink: true,
+          quote: {
+            include: { baseCurrency: true, targetCurrency: true },
+          },
+        },
+      }),
+      this.prisma.paymentRequest.updateMany({
+        where: {
+          metadata: { path: ['invoiceId'], equals: invoice.id },
+        },
+        data: { status: TransactionStatus.CANCELLED },
+      }),
+      this.prisma.paymentLink.updateMany({
+        where: { invoiceId: invoice.id },
+        data: { isActive: false },
+      }),
+    ]);
+
+    return updatedInvoice;
+  }
+
+  private getRequestState(invoice: any) {
+    if (invoice.status === TransactionStatus.SUCCESS) {
+      return 'PAID';
+    }
+
+    if (invoice.flow === PaymentFlow.REQUEST && new Date() > invoice.expiresAt) {
+      return 'EXPIRED';
+    }
+
+    if (invoice.status === TransactionStatus.PROCESSING) {
+      return 'PROCESSING';
+    }
+
+    if (invoice.status === TransactionStatus.PENDING) {
+      return 'PAYABLE';
+    }
+
+    return 'CLOSED';
   }
 }

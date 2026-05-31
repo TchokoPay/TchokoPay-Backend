@@ -502,12 +502,8 @@ export class ProcessPaymentUseCase {
           );
         }
         
-        // For MOMO payout: guest users must provide payerPhone (their MOMO number to receive)
-        if (dto.payoutMethod?.toUpperCase() === 'MOMO') {
-          // Check if user is registered (has non-empty userId after @CurrentUser extraction)
-          // If unregistered/guest and MOMO, payerPhone is required for receiving
-          // This validation is optional here since it's enforced in CreateRequestUseCase
-        }
+        // REQUEST CREATE settlement details are validated in CreateRequestUseCase.
+        // Saved payout settings must not override the phone/account submitted with this request.
         // paymentMethod is optional for REQUEST CREATE (payer chooses during REQUEST PAY)
       }
 
@@ -529,9 +525,8 @@ export class ProcessPaymentUseCase {
           );
         }
         
-        // For MOMO payment: guest users must provide payerPhone
-        // Registered users with MOMO: payerPhone auto-resolved if verified
-        // (Phone resolution validation happens in PhoneResolutionService)
+        // For MOMO/ORANGE payment, the payer phone submitted with this payment is required.
+        // Phone resolution validation happens in PhoneResolutionService.
       }
 
       return; // Validated REQUEST flow, exit early

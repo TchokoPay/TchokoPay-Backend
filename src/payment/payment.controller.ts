@@ -139,8 +139,8 @@ export class PaymentController {
         },
       },
       'DIRECT_MOMO_user_no_verified_phone': {
-        summary: 'DIRECT: Registered MOMO user without verified phone (requires payerPhone field)',
-        description: 'Account exists but phone not verified. payerPhone bypasses verification to proceed with mobile money.',
+        summary: 'DIRECT: Registered MOMO user pays with the entered payerPhone field',
+        description: 'Logged-in users still submit the mobile money number for this payment; saved contacts are not used for payer-side collection.',
         value: {
           flow: 'DIRECT',
           amount: 2500,
@@ -194,7 +194,7 @@ export class PaymentController {
           targetCurrency: 'XAF',
           paymentMethod: 'MOMO',
           payoutMethod: 'MOMO',
-          description: 'Invoice for shoes - valid for 1 hour',
+          description: 'Invoice for shoes - valid for 7 days',
         },
       },
       'REQUEST_CREATE_crypto_invoice': {
@@ -207,7 +207,7 @@ export class PaymentController {
           amountType: 'RECEIVE',
           targetCurrency: 'SAT',
           payoutMethod: 'CRYPTO',
-          description: 'Invoice for 50K satoshis - valid 1 day',
+          description: 'Invoice for 50K satoshis - valid for 7 days',
         },
       },
       'REQUEST_PAY_LIGHTNING_registered': {

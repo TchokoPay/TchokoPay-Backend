@@ -54,6 +54,7 @@ type HistoryStage =
   | 'PAYOUT_PROCESSING'
   | 'COMPLETED'
   | 'FAILED'
+  | 'EXPIRED'
   | 'CANCELLED';
 
 @Injectable()
@@ -414,6 +415,15 @@ export class UsersService {
       return 'FAILED';
     }
 
+    if (
+      invoice.flow === 'REQUEST' &&
+      !invoice.paymentMethod &&
+      !latestAttempt &&
+      new Date() > invoice.expiresAt
+    ) {
+      return 'EXPIRED';
+    }
+
     if (invoice.status === TransactionStatus.CANCELLED) {
       return 'CANCELLED';
     }
@@ -458,6 +468,8 @@ export class UsersService {
         return 'Completed';
       case 'FAILED':
         return 'Failed';
+      case 'EXPIRED':
+        return 'Expired';
       case 'CANCELLED':
         return 'Cancelled';
       default:
