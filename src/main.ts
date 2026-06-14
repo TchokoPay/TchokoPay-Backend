@@ -4,6 +4,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module.js';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
+import compression from 'compression';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import {
   createCorsOriginDelegate,
@@ -14,6 +15,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.use(helmet());
+  app.use(compression());
 
   const allowedOrigins = getHttpCorsOrigins();
   app.enableCors({
@@ -25,6 +27,8 @@ async function bootstrap() {
       'Content-Type',
       'X-Idempotency-Key',
       'x-idempotency-key',
+      'X-Device-Hash',
+      'x-device-hash',
     ],
   });
 

@@ -141,12 +141,14 @@ export class WebhookController {
       throw new BadRequestException('Missing TransactionId in Netwalletpay webhook');
     }
 
-    // ── 1. Optional token verification ──
+    // ── 1. Token verification ──
     const secondaryKey = this.configService.get<string>('NETWALLETPAY_SECONDARY_KEY');
-    if (secondaryKey && callbackToken) {
-      // Netwalletpay signs the callback as SHA256("{orderId}_{secondaryKey}")
-      // The orderId inside the TransactionId varies per provider; we verify leniently.
-      // In production, extract the orderId from the attempt record and compare.
+    if (secondaryKey) {
+      // If the secret is configured, the token MUST be present and valid.
+      // Missing token = potential spoofed request — reject immediately.
+      if (!callbackToken) {
+        throw new BadRequestException('Missing X-CallbackToken header');
+      }
       this.verifyNetwalletpayToken(callbackToken, transactionId, secondaryKey);
     }
 
@@ -464,9 +466,8 @@ export class WebhookController {
 
   /**
    * Verify Netwalletpay X-CallbackToken.
-   * Token = SHA256("{orderId}_{secondaryKey}") — orderId is the numeric part of the reference.
-   * We check leniently (log warning, don't throw) since the orderId in the token
-   * may differ from the TransactionId; use strict mode once you confirm the format.
+   * Token = SHA256("{transactionId}_{secondaryKey}").
+   * Throws BadRequestException on mismatch — fake webhooks are rejected before any DB write.
    */
   private verifyNetwalletpayToken(token: string, transactionId: string, secondaryKey: string) {
     const expected = createHash('sha256')
@@ -475,8 +476,9 @@ export class WebhookController {
 
     if (token !== expected) {
       this.logger.warn(
-        `Netwalletpay callback token mismatch for ${transactionId} — proceeding (verify format in production)`,
+        `Netwalletpay callback token mismatch for ${transactionId}`,
       );
+      throw new BadRequestException('Invalid webhook token');
     }
   }
 }

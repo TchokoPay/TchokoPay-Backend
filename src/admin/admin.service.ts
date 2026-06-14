@@ -10,6 +10,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { ConfigService } from '@nestjs/config';
 import { NetwalletpayProvider } from '../payment/providers/netwalletpay.provider.js';
 import { ZikoPayProvider } from '../payment/providers/zikopay.provider.js';
+import { UserStatusCacheService } from '../redis/user-status-cache.service.js';
 
 type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM' | 'REFUND' | 'WITHDRAWAL';
 
@@ -34,6 +35,7 @@ export class AdminService {
     private config: ConfigService,
     private netwalletpay: NetwalletpayProvider,
     private zikopay: ZikoPayProvider,
+    private userStatusCache: UserStatusCacheService,
   ) {}
 
   // ── Audit ─────────────────────────────────────────────────────────────────
@@ -222,6 +224,9 @@ export class AdminService {
       select: { id: true, firstName: true, lastName: true, isActive: true },
     });
     await this.log(adminId, isActive ? 'USER_ACTIVATED' : 'USER_BANNED', 'USER', userId, {}, ip);
+    // Invalidate the JWT auth cache so a ban/unban takes effect on the user's
+    // very next request instead of waiting up to the cache TTL.
+    await this.userStatusCache.invalidate(userId);
     return updated;
   }
 

@@ -34,6 +34,9 @@ import { CryptoProvider } from './providers/crypto.provider.js';
 import { NetwalletpayProvider } from './providers/netwalletpay.provider.js';
 import { ZikoPayProvider } from './providers/zikopay.provider.js';
 
+// Guards
+import { VelocityGuard } from './guards/velocity.guard.js';
+
 // Services
 import { PhoneResolutionService } from './services/phone-resolution.service.js';
 import { BlinkApiService } from './providers/services/blink-api.service.js';
@@ -81,6 +84,8 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     PaymentPollingService,
     // WebSocket Gateway
     PaymentGateway,
+    // Guards
+    VelocityGuard,
   ],
   exports: [PaymentService, NetwalletpayProvider, ZikoPayProvider],
 })

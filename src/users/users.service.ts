@@ -73,7 +73,7 @@ export class UsersService {
   async getMe(userId: string) {
     this.logger.log(`Fetching user profile for userId: ${userId}`);
 
-    const user = await this.prisma.user.findUnique({
+    const userPromise = this.prisma.user.findUnique({
       where: { id: userId },
       include: {
         contacts: true,
@@ -82,6 +82,11 @@ export class UsersService {
         paymentIdentity: true,
       },
     });
+    const payoutSettingPromise =
+      this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
+
+    const user = await userPromise;
+    const payoutSetting = await payoutSettingPromise;
 
     if (!user) {
       this.logger.warn(`User not found: ${userId}`);
@@ -89,8 +94,6 @@ export class UsersService {
     }
 
     const { password, refreshToken, googleId, ...safeUser } = user;
-    const payoutSetting =
-      await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
 
     this.logger.log(`User fetched successfully: ${userId}`);
 

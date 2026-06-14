@@ -6,6 +6,7 @@ import {
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '../../../prisma/prisma.service.js';
+import { UserStatusCacheService } from '../../redis/user-status-cache.service.js';
 
 interface JwtPayload {
     sub: string;
@@ -16,7 +17,10 @@ interface JwtPayload {
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-    constructor(private prisma: PrismaService) {
+    constructor(
+        private prisma: PrismaService,
+        private userStatusCache: UserStatusCacheService,
+    ) {
         const secret = process.env.JWT_ACCESS_SECRET;
 
         if (!secret) {
@@ -36,19 +40,25 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
             throw new UnauthorizedException('Invalid token payload');
         }
 
-        // 🔥 OPTIONAL BUT HIGHLY RECOMMENDED
-        const user = await this.prisma.user.findUnique({
-            where: { id: payload.sub },
-        });
-
-        if (!user) {
-            throw new UnauthorizedException('User no longer exists');
+        // Short-TTL Redis cache avoids a Postgres round trip on every request.
+        const cachedActive = await this.userStatusCache.isActive(payload.sub);
+        if (cachedActive) {
+            return {
+                userId: payload.sub,
+                identifier: payload.identifier,
+            };
         }
 
-        // ❌ Optional: block deactivated users if you add this field
-        // if (!user.isActive) {
-        //     throw new UnauthorizedException('User is disabled');
-        // }
+        const user = await this.prisma.user.findUnique({
+            where: { id: payload.sub },
+            select: { id: true, isActive: true },
+        });
+
+        if (!user || !user.isActive) {
+            throw new UnauthorizedException('User no longer exists or is inactive');
+        }
+
+        await this.userStatusCache.markActive(user.id);
 
         return {
             userId: user.id,

@@ -1,9 +1,10 @@
 /* eslint-disable prettier/prettier */
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { OAuth2Client, TokenPayload } from 'google-auth-library';
 
 @Injectable()
 export class GoogleAuthService {
+  private readonly logger = new Logger(GoogleAuthService.name);
   private client: OAuth2Client;
 
   constructor() {
@@ -55,7 +56,15 @@ export class GoogleAuthService {
         picture: picture || null,
       };
     } catch (error) {
-      console.error('❌ Google Auth Error:', error);
+      // Preserve specific, user-actionable messages (e.g. "Google email not
+      // verified") thrown above instead of masking them with a generic one.
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+
+      this.logger.error(
+        `Google token verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
       throw new UnauthorizedException('Google authentication failed');
     }
   }

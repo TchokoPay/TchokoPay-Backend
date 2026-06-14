@@ -5,8 +5,9 @@
  */
 
 generator client {
-  provider   = "prisma-client-js"
-  engineType = "library"
+  provider        = "prisma-client-js"
+  engineType      = "library"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -122,6 +123,8 @@ model User {
   paymentIdentity   PaymentIdentity? // 👈 NEW
   recipientInvoices PaymentInvoice[] @relation("RecipientInvoices")
   createdInvoices   PaymentInvoice[] @relation("CreatedInvoices")
+  auditLogs         AuditLog[]
+  sessions          UserSession[]
 
   @@index([googleId])
 }
@@ -867,18 +870,44 @@ model AuditLog {
   id String @id @default(uuid())
 
   userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  action String
-
-  entity String
-
-  entityId String?
-
-  metadata Json?
+  action    String
+  entity    String
+  entityId  String?
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
 
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+/**
+ * =====================================================
+ * USER SESSIONS (SESSION MANAGEMENT)
+ * Lets users see and revoke active sessions.
+ * =====================================================
+ */
+model UserSession {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName String?
+  ipAddress  String?
+  userAgent  String?
+  deviceHash String?
+  isRevoked  Boolean  @default(false)
+
+  lastActiveAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  revokedAt    DateTime?
+
+  @@index([userId])
+  @@index([deviceHash])
 }
 
 /**

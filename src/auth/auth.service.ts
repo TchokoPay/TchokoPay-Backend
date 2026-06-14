@@ -9,6 +9,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { JwtService } from '@nestjs/jwt';
 
 import * as bcrypt from 'bcrypt';
+import { createHash, timingSafeEqual } from 'crypto';
 
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
@@ -36,17 +37,17 @@ export class AuthService {
     return trimmed.includes('@') ? trimmed.toLowerCase() : trimmed;
   }
 
-  /** Fetch the user's role for embedding in the JWT payload. */
-  private async getUserRole(userId: string): Promise<string> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-    return user?.role ?? 'USER';
+  /**
+   * Refresh tokens are high-entropy signed JWTs, not user-chosen secrets —
+   * a fast SHA-256 digest (compared in constant time) is sufficient and
+   * avoids bcrypt's ~100ms cost on every login/refresh.
+   */
+  private hashRefreshToken(refreshToken: string): string {
+    return createHash('sha256').update(refreshToken).digest('hex');
   }
 
   private async storeRefreshToken(userId: string, refreshToken: string) {
-    const hashedRefreshToken = await bcrypt.hash(refreshToken, 10);
+    const hashedRefreshToken = this.hashRefreshToken(refreshToken);
 
     await this.prisma.user.update({
       where: { id: userId },
@@ -204,6 +205,7 @@ export class AuthService {
         user: {
           select: {
             firstName: true,
+            role: true,
           },
         },
       },
@@ -214,12 +216,11 @@ export class AuthService {
     }
 
     if (contact.isVerified) {
-      const role = await this.getUserRole(contact.userId);
       const tokens = await generateTokens(
         this.jwtService,
         contact.userId,
         contact.value,
-        role,
+        contact.user.role,
       );
 
       await this.storeRefreshToken(contact.userId, tokens.refreshToken);
@@ -233,36 +234,38 @@ export class AuthService {
     // 🔐 Validate OTP
     await this.otpService.verifyOtp(contact.id, code);
 
-    // ✅ Mark verified
-    await this.prisma.userContact.update({
-      where: { id: contact.id },
-      data: { isVerified: true },
-    });
-
     this.logger.log(`Contact verified: ${contact.value}`);
 
     // 🎟 Issue tokens AFTER verification
-    const role = await this.getUserRole(contact.userId);
     const tokens = await generateTokens(
       this.jwtService,
       contact.userId,
       contact.value,
-      role,
+      contact.user.role,
     );
 
-    await this.storeRefreshToken(contact.userId, tokens.refreshToken);
+    // Mark the contact verified and persist the new refresh token in
+    // parallel — independent writes, no need to serialize them.
+    await Promise.all([
+      this.prisma.userContact.update({
+        where: { id: contact.id },
+        data: { isVerified: true },
+      }),
+      this.storeRefreshToken(contact.userId, tokens.refreshToken),
+    ]);
 
     if (contact.type === 'EMAIL') {
-      try {
-        await this.emailService.sendWelcomeEmail({
+      // Fire-and-forget — don't make the user wait on the email API.
+      this.emailService
+        .sendWelcomeEmail({
           to: contact.value,
           firstName: contact.user.firstName,
+        })
+        .catch((error) => {
+          this.logger.warn(
+            `Welcome email failed for ${contact.value}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         });
-      } catch (error) {
-        this.logger.warn(
-          `Welcome email failed for ${contact.value}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
     }
 
     return {
@@ -501,23 +504,25 @@ export class AuthService {
     );
     await this.storeRefreshToken(user.id, tokens.refreshToken);
 
-    try {
-      if (authFlow === 'created') {
-        await this.emailService.sendWelcomeEmail({
-          to: email,
-          firstName: user.firstName,
-        });
-      } else if (authFlow === 'linked') {
-        await this.emailService.sendGoogleLinkedEmail({
-          to: email,
-          firstName: user.firstName,
-        });
-      }
-    } catch (error) {
+    // Fire-and-forget — don't make the user wait on the email API.
+    const postGoogleEmail =
+      authFlow === 'created'
+        ? this.emailService.sendWelcomeEmail({
+            to: email,
+            firstName: user.firstName,
+          })
+        : authFlow === 'linked'
+          ? this.emailService.sendGoogleLinkedEmail({
+              to: email,
+              firstName: user.firstName,
+            })
+          : null;
+
+    postGoogleEmail?.catch((error) => {
       this.logger.warn(
         `Post-Google email failed for ${email}: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
 
     return {
       ...tokens,
@@ -533,25 +538,52 @@ export class AuthService {
   // =====================================================
   // 🔁 REFRESH TOKENS
   // =====================================================
+
+  /**
+   * Verify the refresh-token cookie JWT to extract userId without trusting
+   * the request body. This closes the theoretical IDOR where a caller could
+   * pair another user's refresh cookie with an arbitrary userId.
+   */
+  async refreshTokensFromCookie(refreshToken: string) {
+    let payload: { sub: string };
+    try {
+      payload = await this.jwtService.verifyAsync<{ sub: string }>(
+        refreshToken,
+        {
+          secret: process.env.JWT_REFRESH_SECRET,
+        },
+      );
+    } catch {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    return this.refreshTokens(payload.sub, refreshToken);
+  }
+
   async refreshTokens(userId: string, refreshToken: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-    });
+    // These two reads are independent — fetch them concurrently.
+    const [user, identifier] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId } }),
+      this.getTokenIdentifier(userId, userId),
+    ]);
 
     if (!user || !user.refreshToken) {
       throw new UnauthorizedException('Access denied');
     }
 
-    const isMatch = await bcrypt.compare(
-      refreshToken,
-      user.refreshToken,
+    const incomingHash = Buffer.from(
+      this.hashRefreshToken(refreshToken),
+      'hex',
     );
+    const storedHash = Buffer.from(user.refreshToken, 'hex');
+
+    const isMatch =
+      incomingHash.length === storedHash.length &&
+      timingSafeEqual(incomingHash, storedHash);
 
     if (!isMatch) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    const identifier = await this.getTokenIdentifier(user.id, userId);
     const tokens = await generateTokens(
       this.jwtService,
       user.id,

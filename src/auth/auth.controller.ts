@@ -16,13 +16,18 @@ import {
   ApiBody,
 } from '@nestjs/swagger';
 
+import { Throttle, SkipThrottle } from '@nestjs/throttler';
+
 import { AuthService } from './auth.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { SessionsService } from './sessions/sessions.service.js';
 
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { VerifyDto } from './dto/verify.dto.js';
 
 import { Public } from './decorators/public.decorator.js';
+import { parseJwtPayload } from './utils/tokens.js';
 
 import type { Request, Response } from 'express';
 import type { CookieOptions } from 'express';
@@ -58,7 +63,11 @@ function refreshCookieOptions(): CookieOptions {
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private audit: AuditService,
+    private sessions: SessionsService,
+  ) {}
 
   @Public()
   @Get('google/config')
@@ -78,6 +87,8 @@ export class AuthController {
   // 📝 SIGNUP (OTP REQUIRED)
   // =========================
   @Public()
+  @SkipThrottle({ global: true })
+  @Throttle({ auth: { limit: 15, ttl: 60_000 } })
   @Post('signup')
   @ApiOperation({
     summary:
@@ -92,6 +103,8 @@ export class AuthController {
   // ✅ VERIFY OTP (ACTIVATION)
   // =========================
   @Public()
+  @SkipThrottle({ global: true })
+  @Throttle({ auth: { limit: 10, ttl: 300_000 } })
   @Post('verify')
   @ApiOperation({
     summary:
@@ -113,6 +126,8 @@ export class AuthController {
   }
 
   @Public()
+  @SkipThrottle({ global: true })
+  @Throttle({ auth: { limit: 5, ttl: 300_000 } })
   @Post('resend-verification')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -138,6 +153,8 @@ export class AuthController {
   // 🔐 LOGIN (ONLY VERIFIED USERS)
   // =========================
   @Public()
+  @SkipThrottle({ global: true })
+  @Throttle({ auth: { limit: 8, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -147,11 +164,32 @@ export class AuthController {
   @ApiBody({ type: LoginDto })
   async login(
     @Body() dto: LoginDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     const tokens = await this.authService.login(dto);
 
     res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+
+    const payload = parseJwtPayload(tokens.accessToken);
+    const userId = payload?.sub as string | undefined;
+    const deviceHash = req.headers['x-device-hash'] as string | undefined;
+
+    this.audit.log({
+      userId,
+      action: 'USER_LOGIN',
+      entity: 'User',
+      entityId: userId,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    this.sessions.trackLogin({
+      userId: userId!,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] as string,
+      deviceHash,
+    });
 
     return {
       accessToken: tokens.accessToken,
@@ -162,6 +200,8 @@ export class AuthController {
   // 🌐 GOOGLE LOGIN
   // =========================
   @Public()
+  @SkipThrottle({ global: true })
+  @Throttle({ auth: { limit: 15, ttl: 60_000 } })
   @Post('google')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -181,11 +221,21 @@ export class AuthController {
   })
   async googleLogin(
     @Body('token') token: string,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     const result = await this.authService.googleLogin(token);
 
     res.cookie('refreshToken', result.refreshToken, refreshCookieOptions());
+
+    const payload = parseJwtPayload(result.accessToken);
+    const userId = payload?.sub as string | undefined;
+    this.sessions.trackLogin({
+      userId: userId!,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] as string,
+      deviceHash: req.headers['x-device-hash'] as string | undefined,
+    });
 
     return {
       accessToken: result.accessToken,
@@ -197,38 +247,25 @@ export class AuthController {
   // 🔁 REFRESH TOKEN
   // =========================
   @Public()
+  @SkipThrottle({ global: true })
+  @Throttle({ auth: { limit: 40, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Refresh access token',
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        userId: {
-          type: 'string',
-          example: 'user-id',
-        },
-      },
-      required: ['userId'],
-    },
+    summary: 'Refresh access token using the httpOnly refreshToken cookie',
   })
   async refresh(
-    @Body('userId') userId: string,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     const refreshToken = req.cookies?.refreshToken;
 
-    if (!refreshToken || !userId) {
+    if (!refreshToken) {
       throw new UnauthorizedException('Unauthorized');
     }
 
-    const tokens = await this.authService.refreshTokens(
-      userId,
-      refreshToken,
-    );
+    // userId is extracted from the JWT payload — not trusted from the body
+    const tokens = await this.authService.refreshTokensFromCookie(refreshToken);
 
     res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
 
@@ -272,6 +309,15 @@ export class AuthController {
     await this.authService.logout(userId);
 
     res.clearCookie('refreshToken', refreshCookieOptions());
+
+    this.audit.log({
+      userId,
+      action: 'USER_LOGOUT',
+      entity: 'User',
+      entityId: userId,
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'] as string | undefined,
+    });
 
     return {
       message: 'Logged out successfully',

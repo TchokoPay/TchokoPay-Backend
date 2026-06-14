@@ -4,6 +4,8 @@ import { PassportModule } from '@nestjs/passport';
 
 import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
+import { SessionsService } from './sessions/sessions.service.js';
+import { SessionsController } from './sessions/sessions.controller.js';
 import { GoogleModule } from '../google/google.module.js';
 import { OtpModule } from '../otp/otp.module.js';
 import { EmailModule } from '../email/email.module.js';
@@ -25,6 +27,7 @@ import { APP_GUARD } from '@nestjs/core';
   ],
   providers: [
     AuthService,
+    SessionsService,
     JwtStrategy,
     JwtAuthGuard,
     {
@@ -32,7 +35,7 @@ import { APP_GUARD } from '@nestjs/core';
       useClass: JwtAuthGuard,
     },
   ],
-  controllers: [AuthController],
-  exports: [AuthService, JwtModule],
+  controllers: [AuthController, SessionsController],
+  exports: [AuthService, SessionsService, JwtModule],
 })
 export class AuthModule {}

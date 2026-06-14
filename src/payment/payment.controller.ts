@@ -16,6 +16,8 @@ import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 import { OptionalJwtGuard } from '../auth/guards/optional-jwt.guard.js';
 import { Public } from '../auth/decorators/public.decorator.js';
+import { AuditService } from '../audit/audit.service.js';
+import { VelocityGuard } from './guards/velocity.guard.js';
 
 import {
   ApiTags,
@@ -31,7 +33,10 @@ import {
 @UseGuards(JwtAuthGuard)
 @Controller('payments')
 export class PaymentController {
-  constructor(private readonly service: PaymentService) {}
+  constructor(
+    private readonly service: PaymentService,
+    private readonly audit: AuditService,
+  ) {}
 
   // ============================
   // PROCESS PAYMENT (FLOW-BASED)
@@ -41,7 +46,7 @@ export class PaymentController {
   // ============================
   @Post()
   @Public()
-  @UseGuards(OptionalJwtGuard)
+  @UseGuards(OptionalJwtGuard, VelocityGuard)
   @ApiOperation({
     summary: 'Process payment (DIRECT, QR, REQUEST)',
     description: `
@@ -299,6 +304,17 @@ export class PaymentController {
     }
     // req.user is null for guests; pass empty string so service knows it's a guest
     const userId: string = (req.user as { userId: string } | null)?.userId ?? '';
+
+    const r = req as { ip?: string; headers?: Record<string, string> };
+    this.audit.log({
+      userId: userId || undefined,
+      action: 'PAYMENT_INITIATED',
+      entity: 'Payment',
+      ipAddress: r.ip,
+      userAgent: r.headers?.['user-agent'],
+      metadata: { flow: dto.flow, action: dto.action, paymentMethod: dto.paymentMethod },
+    });
+
     return this.service.processPayment(userId, dto);
   }
 
