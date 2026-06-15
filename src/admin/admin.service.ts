@@ -12,7 +12,7 @@ import { NetwalletpayProvider } from '../payment/providers/netwalletpay.provider
 import { ZikoPayProvider } from '../payment/providers/zikopay.provider.js';
 import { UserStatusCacheService } from '../redis/user-status-cache.service.js';
 
-type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM' | 'REFUND' | 'WITHDRAWAL';
+type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM' | 'REFUND' | 'WITHDRAWAL' | 'MERCHANT';
 
 type FeeConfigInput = {
   baseCurrencyCode?: string | null;
@@ -621,6 +621,63 @@ export class AdminService {
     );
 
     return updatedKyc;
+  }
+
+  // ── Merchants ────────────────────────────────────────────────────────────
+
+  async listMerchants(params: { page: number; limit: number; status?: string }) {
+    const { page, limit, status } = params;
+    const skip = (page - 1) * limit;
+    const where = status ? { status: status as any } : {};
+
+    const [items, total] = await Promise.all([
+      this.prisma.merchantProfile.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: { user: { select: { firstName: true, lastName: true, contacts: true } } },
+      }),
+      this.prisma.merchantProfile.count({ where }),
+    ]);
+
+    return {
+      data: items,
+      meta: { total, page, limit, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  async reviewMerchant(
+    adminId: string,
+    merchantId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    reason?: string,
+    ip?: string,
+  ) {
+    const profile = await this.prisma.merchantProfile.findUnique({ where: { id: merchantId } });
+    if (!profile) throw new NotFoundException('Merchant application not found');
+    if (profile.status !== 'PENDING') throw new BadRequestException('Application is not pending');
+
+    const updated = await this.prisma.merchantProfile.update({
+      where: { id: merchantId },
+      data: {
+        status: decision,
+        reviewedAt: new Date(),
+        reviewedById: adminId,
+        rejectionReason: decision === 'REJECTED' ? reason : null,
+      },
+    });
+
+    await this.log(
+      adminId,
+      decision === 'APPROVED' ? 'MERCHANT_APPROVED' : 'MERCHANT_REJECTED',
+      'MERCHANT',
+      merchantId,
+      { userId: profile.userId, reason },
+      ip,
+    );
+
+    return updated;
   }
 
   // ── Audit log ─────────────────────────────────────────────────────────────

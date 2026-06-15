@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 
 import { FileInterceptor } from '@nestjs/platform-express';
+import { SkipThrottle } from '@nestjs/throttler';
 import * as multer from 'multer';
 
 import { UsersService } from './users.service.js';
@@ -37,6 +38,7 @@ export class UsersController {
   // 👤 GET CURRENT USER
   // =====================================================
   @Get('me')
+  @SkipThrottle({ auth: true })
   @ApiOperation({ summary: 'Get current user profile' })
   getMe(@CurrentUser() user: any) {
     return this.usersService.getMe(user.userId);

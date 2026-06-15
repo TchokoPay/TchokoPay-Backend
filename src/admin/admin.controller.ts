@@ -241,6 +241,30 @@ export class AdminController {
     return this.admin.reviewKyc(req.user.userId, kycId, decision, reason, req.ip);
   }
 
+  // ── Merchants ──────────────────────────────────────────────────────────────
+
+  @Get('merchants')
+  @ApiOperation({ summary: 'List merchant applications' })
+  @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'APPROVED', 'REJECTED', 'SUSPENDED'] })
+  listMerchants(
+    @Query('page',   new DefaultValuePipe(1),  ParseIntPipe) page: number,
+    @Query('limit',  new DefaultValuePipe(20), ParseIntPipe) limit: number,
+    @Query('status') status?: string,
+  ) {
+    return this.admin.listMerchants({ page, limit, status });
+  }
+
+  @Patch('merchants/:id/review')
+  @ApiOperation({ summary: 'Approve or reject a merchant application' })
+  reviewMerchant(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') merchantId: string,
+    @Body('decision') decision: 'APPROVED' | 'REJECTED',
+    @Body('reason') reason?: string,
+  ) {
+    return this.admin.reviewMerchant(req.user.userId, merchantId, decision, reason, req.ip);
+  }
+
   // ── Country & Provider Management ────────────────────────────────────────
 
   @Get('countries')

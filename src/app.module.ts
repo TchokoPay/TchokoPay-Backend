@@ -27,6 +27,7 @@ import { PaymentIdentityModule } from './payment-identity/payment-identity.modul
 import { PaymentModule } from './payment/payment.module.js';
 import { AdminModule } from './admin/admin.module.js';
 import { EmailModule } from './email/email.module.js';
+import { MerchantModule } from './merchant/merchant.module.js';
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { EmailModule } from './email/email.module.js';
     PaymentModule,
     AdminModule,
     EmailModule,
+    MerchantModule,
   ],
   controllers: [AppController, QuoteController, PaymentIdentityController],
   providers: [

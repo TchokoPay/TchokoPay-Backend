@@ -80,6 +80,7 @@ export class UsersService {
         wallets: { include: { currency: true } },
         kyc: true,
         paymentIdentity: true,
+        merchantProfile: true,
       },
     });
     const payoutSettingPromise =
