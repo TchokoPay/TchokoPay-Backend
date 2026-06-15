@@ -1,13 +1,139 @@
 /* eslint-disable prettier/prettier */
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { UserSettingsService } from '../users/services/user-settings.service.js';
 import { ApplyMerchantDto } from './dto/apply-merchant.dto.js';
 
 type AnalyticsPeriod = '7d' | '30d' | '90d';
 
+/** Shape returned for a merchant payout setting (a UserPaymentPhoneSettings row). */
+const PAYOUT_SELECT = {
+  id: true,
+  paymentMethod: true,
+  phone: true,
+  isPrimary: true,
+  isVerified: true,
+  country: { select: { iso2: true, name: true, dialCode: true } },
+  provider: { select: { providerCode: true, name: true } },
+} as const;
+
 @Injectable()
 export class MerchantService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private userSettings: UserSettingsService,
+  ) {}
+
+  // =====================================================
+  // 🏪 MERCHANT HANDLE (BUSINESS STOREFRONT IDENTITY)
+  // =====================================================
+
+  /** APPROVED-merchant guard shared by all storefront actions. */
+  private async requireApprovedProfile(userId: string) {
+    const profile = await this.prisma.merchantProfile.findUnique({ where: { userId } });
+    if (!profile || profile.status !== 'APPROVED') {
+      throw new ForbiddenException('Merchant access required');
+    }
+    return profile;
+  }
+
+  private cleanForHandle(name: string): string {
+    return name.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  private async generateBusinessHandle(businessName: string): Promise<string> {
+    const clean = this.cleanForHandle(businessName) || 'business';
+    const base = `@tchoko-${clean}`;
+    let handle = base;
+    let counter = 1;
+    while (await this.prisma.paymentIdentity.findUnique({ where: { handle } })) {
+      handle = `${base}${counter}`;
+      counter++;
+    }
+    return handle;
+  }
+
+  /** Resolve & validate the payout setting the merchant handle should route to. */
+  private async resolvePayoutSetting(userId: string, payoutSettingId?: string) {
+    if (payoutSettingId) {
+      const setting = await this.prisma.userPaymentPhoneSettings.findFirst({
+        where: { id: payoutSettingId, userId, isVerified: true, isUserConfirmed: true },
+      });
+      if (!setting) {
+        throw new BadRequestException('That payout number is not valid or not verified');
+      }
+      return setting;
+    }
+
+    // Inherit: fall back to the user's primary verified payout setting.
+    const primary = await this.userSettings.getPrimaryVerifiedPayoutSetting(userId);
+    if (!primary) {
+      throw new BadRequestException(
+        'Verify a payout number before creating your business handle',
+      );
+    }
+    return primary;
+  }
+
+  /** Returns the merchant's storefront identity (handle + payout), or null. */
+  async getMyHandle(userId: string) {
+    const profile = await this.prisma.merchantProfile.findUnique({ where: { userId } });
+    if (!profile) return null;
+
+    return this.prisma.paymentIdentity.findUnique({
+      where: { merchantProfileId: profile.id },
+      include: { payoutSetting: { select: PAYOUT_SELECT } },
+    });
+  }
+
+  /**
+   * Create the business storefront handle for an APPROVED merchant.
+   * - payoutSettingId omitted -> inherit the user's primary verified payout.
+   * - payoutSettingId provided -> route business money to that verified number.
+   * Idempotent: returns the existing handle if one already exists.
+   */
+  async createHandle(userId: string, payoutSettingId?: string) {
+    const profile = await this.requireApprovedProfile(userId);
+
+    const existing = await this.prisma.paymentIdentity.findUnique({
+      where: { merchantProfileId: profile.id },
+      include: { payoutSetting: { select: PAYOUT_SELECT } },
+    });
+    if (existing) return existing;
+
+    const payout = await this.resolvePayoutSetting(userId, payoutSettingId);
+    const handle = await this.generateBusinessHandle(profile.businessName);
+
+    return this.prisma.paymentIdentity.create({
+      data: {
+        kind: 'MERCHANT',
+        handle,
+        merchantProfile: { connect: { id: profile.id } },
+        payoutSetting: { connect: { id: payout.id } },
+      },
+      include: { payoutSetting: { select: PAYOUT_SELECT } },
+    });
+  }
+
+  /** Switch which payout number the business handle settles to. */
+  async updateHandlePayout(userId: string, payoutSettingId: string) {
+    const profile = await this.requireApprovedProfile(userId);
+
+    const identity = await this.prisma.paymentIdentity.findUnique({
+      where: { merchantProfileId: profile.id },
+    });
+    if (!identity) {
+      throw new BadRequestException('Create your business handle first');
+    }
+
+    const payout = await this.resolvePayoutSetting(userId, payoutSettingId);
+
+    return this.prisma.paymentIdentity.update({
+      where: { id: identity.id },
+      data: { payoutSetting: { connect: { id: payout.id } } },
+      include: { payoutSetting: { select: PAYOUT_SELECT } },
+    });
+  }
 
   /** Returns the caller's merchant profile, or null if they've never applied. */
   async getMyProfile(userId: string) {
@@ -73,7 +199,9 @@ export class MerchantService {
     since.setDate(since.getDate() - days);
 
     const invoices = await this.prisma.paymentInvoice.findMany({
-      where: { recipientId: userId, createdAt: { gte: since } },
+      // Business money only — invoices tagged with this merchant profile
+      // (paid to the business storefront handle), not personal receipts.
+      where: { merchantProfileId: profile.id, createdAt: { gte: since } },
       select: {
         status: true,
         flow: true,

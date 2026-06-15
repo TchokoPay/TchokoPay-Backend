@@ -317,6 +317,31 @@ export class UserSettingsService {
     };
   }
 
+  async removeMobileMoneyNumber(userId: string, settingId: string) {
+    const setting = await this.prisma.userPaymentPhoneSettings.findUnique({
+      where: { id: settingId },
+      include: { merchantIdentities: { select: { id: true } } },
+    });
+
+    if (!setting || setting.userId !== userId) {
+      throw new NotFoundException('Payout number not found');
+    }
+
+    // A number a business storefront settles to can't be removed out from under
+    // it — the merchant must point their handle at another number first.
+    if (setting.merchantIdentities.length > 0) {
+      throw new BadRequestException(
+        'This is your business payout number. Set a different business payout before removing it.',
+      );
+    }
+
+    await this.prisma.userPaymentPhoneSettings.delete({
+      where: { id: settingId },
+    });
+
+    return { message: 'Payout number removed' };
+  }
+
   async getPrimaryVerifiedPayoutSetting(userId: string) {
     const primary =
       (await this.prisma.userPaymentPhoneSettings.findFirst({

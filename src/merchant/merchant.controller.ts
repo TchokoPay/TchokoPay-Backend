@@ -1,5 +1,5 @@
 /* eslint-disable prettier/prettier */
-import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 
@@ -38,5 +38,23 @@ export class MerchantController {
   @ApiQuery({ name: 'period', required: false, enum: ['7d', '30d', '90d'] })
   getAnalytics(@Req() req: AuthRequest, @Query('period') period?: '7d' | '30d' | '90d') {
     return this.merchant.getAnalytics(req.user.userId, period);
+  }
+
+  @Get('handle')
+  @ApiOperation({ summary: 'Get my business storefront handle + payout' })
+  getMyHandle(@Req() req: AuthRequest) {
+    return this.merchant.getMyHandle(req.user.userId);
+  }
+
+  @Post('handle')
+  @ApiOperation({ summary: 'Create my business storefront handle (inherit or pick a verified payout)' })
+  createHandle(@Req() req: AuthRequest, @Body() body: { payoutSettingId?: string }) {
+    return this.merchant.createHandle(req.user.userId, body?.payoutSettingId);
+  }
+
+  @Patch('handle/payout')
+  @ApiOperation({ summary: 'Change which payout number my business handle settles to' })
+  updateHandlePayout(@Req() req: AuthRequest, @Body() body: { payoutSettingId: string }) {
+    return this.merchant.updateHandlePayout(req.user.userId, body.payoutSettingId);
   }
 }

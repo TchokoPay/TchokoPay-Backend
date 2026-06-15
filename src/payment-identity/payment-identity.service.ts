@@ -142,17 +142,30 @@ export class PaymentIdentityService {
       where: { handle: normalizedHandle },
       include: {
         user: true,
+        merchantProfile: { include: { user: true } },
+        payoutSetting: { include: { provider: true } },
       },
     });
 
-    if (!identity || !identity.user) {
+    if (!identity) {
       throw new BadRequestException('Invalid handle');
     }
 
-    const payoutSetting =
-      await this.userSettings.getPrimaryVerifiedPayoutSetting(identity.userId);
+    const isMerchant = identity.kind === 'MERCHANT';
 
-    if (!payoutSetting) {
+    // The user displayed/owning this handle.
+    const ownerUser = isMerchant ? identity.merchantProfile?.user : identity.user;
+    if (!ownerUser) {
+      throw new BadRequestException('Invalid handle');
+    }
+
+    // MERCHANT handles settle to their chosen business payout; PERSONAL handles
+    // fall back to the owner's primary verified payout.
+    const payoutSetting = isMerchant
+      ? identity.payoutSetting
+      : await this.userSettings.getPrimaryVerifiedPayoutSetting(ownerUser.id);
+
+    if (!payoutSetting || !payoutSetting.isVerified) {
       throw new BadRequestException('This handle is not ready to receive payments');
     }
 
@@ -167,9 +180,11 @@ export class PaymentIdentityService {
 
     return {
       handle: identity.handle,
+      kind: identity.kind,
+      businessName: isMerchant ? identity.merchantProfile?.businessName ?? null : null,
       recipient: {
-        firstName: identity.user.firstName,
-        lastName: identity.user.lastName,
+        firstName: ownerUser.firstName,
+        lastName: ownerUser.lastName,
       },
       payoutMethod: payoutSetting.paymentMethod,
       payoutProvider: payoutSetting.provider.name,

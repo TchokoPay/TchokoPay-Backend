@@ -197,9 +197,68 @@ export class UsersService {
   // =====================================================
   async getMyTransactions(userId: string) {
     const invoices = await this.prisma.paymentInvoice.findMany({
+      // Personal history: everything the user paid/sent (including buying from a
+      // business), plus payments they received PERSONALLY. Money received as a
+      // business (tagged with a merchantProfileId) is excluded — it belongs to
+      // the Merchant view, so the two never mix.
       where: {
-        OR: [{ createdById: userId }, { recipientId: userId }],
+        OR: [
+          { createdById: userId },
+          { recipientId: userId, merchantProfileId: null },
+        ],
       },
+      include: {
+        currency: true,
+        quote: {
+          include: {
+            baseCurrency: true,
+            targetCurrency: true,
+          },
+        },
+        createdBy: {
+          include: {
+            paymentIdentity: true,
+          },
+        },
+        recipient: {
+          include: {
+            paymentIdentity: true,
+          },
+        },
+        attempts: {
+          include: {
+            currency: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+        payout: {
+          include: {
+            attempts: {
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 100,
+    });
+
+    return invoices.map((invoice) => this.mapInvoiceHistory(invoice, userId));
+  }
+
+  // =====================================================
+  // 🏪 GET BUSINESS TRANSACTION HISTORY (MERCHANT)
+  // =====================================================
+  /** Payments received by the user's business storefront (merchant-tagged only). */
+  async getMyBusinessTransactions(userId: string) {
+    const profile = await this.prisma.merchantProfile.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (!profile) return [];
+
+    const invoices = await this.prisma.paymentInvoice.findMany({
+      where: { merchantProfileId: profile.id },
       include: {
         currency: true,
         quote: {

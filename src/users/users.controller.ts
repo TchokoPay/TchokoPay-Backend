@@ -69,9 +69,15 @@ export class UsersController {
   // 📋 GET TRANSACTION HISTORY
   // =====================================================
   @Get('me/transactions')
-  @ApiOperation({ summary: 'Get current user transaction history' })
+  @ApiOperation({ summary: 'Get current user personal transaction history' })
   getMyTransactions(@CurrentUser() user: any) {
     return this.usersService.getMyTransactions(user.userId);
+  }
+
+  @Get('me/business-transactions')
+  @ApiOperation({ summary: 'Get payments received by my business storefront' })
+  getMyBusinessTransactions(@CurrentUser() user: any) {
+    return this.usersService.getMyBusinessTransactions(user.userId);
   }
 
   // =====================================================

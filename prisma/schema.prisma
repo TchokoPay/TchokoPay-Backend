@@ -253,6 +253,11 @@ model MerchantProfile {
   reviewedById    String?
   reviewedAt      DateTime?
 
+  // Business payment handle (the @tchoko-bizness storefront identity).
+  paymentIdentity PaymentIdentity?
+  // Payments received by this business (PaymentInvoice tagged with this profile).
+  invoices        PaymentInvoice[] @relation("MerchantInvoices")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -604,13 +609,36 @@ model PaymentRequest {
  * PAYMENT IDENTITY (PUBLIC HANDLE)
  * =====================================================
  */
+enum PaymentIdentityKind {
+  PERSONAL
+  MERCHANT
+}
+
 model PaymentIdentity {
   id String @id @default(uuid())
 
-  userId String @unique
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // PERSONAL identities carry the owning userId (nullable-unique keeps the
+  // existing 1:1 User.paymentIdentity relation intact). MERCHANT identities
+  // leave this null and link via merchantProfileId; their owner is derived
+  // through merchantProfile.userId.
+  userId String? @unique
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  handle String @unique // @tchoko-brian, @tchoko-brian1
+  // PERSONAL belongs to the user; MERCHANT represents a business (operated by
+  // the owning user, but branded as the business).
+  kind PaymentIdentityKind @default(PERSONAL)
+
+  // Set only on MERCHANT identities — links the handle to the business profile.
+  merchantProfileId String?          @unique
+  merchantProfile   MerchantProfile? @relation(fields: [merchantProfileId], references: [id], onDelete: Cascade)
+
+  // Which payout number receives money for this handle. Null on PERSONAL
+  // identities (they fall back to the user's primary verified payout); set on
+  // MERCHANT identities to the chosen business payout (inherited or dedicated).
+  payoutSettingId String?
+  payoutSetting   UserPaymentPhoneSettings? @relation(fields: [payoutSettingId], references: [id], onDelete: SetNull)
+
+  handle String @unique // @tchoko-brian, @tchoko-bizness
 
   isActive Boolean @default(true)
 
@@ -654,6 +682,9 @@ model UserPaymentPhoneSettings {
   isUserConfirmed Boolean @default(true)
   verifiedAt DateTime?
 
+  // Merchant identities that route their business payout to this number.
+  merchantIdentities PaymentIdentity[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -690,6 +721,11 @@ model PaymentInvoice {
   recipientId String?
   recipient   User?   @relation("RecipientInvoices", fields: [recipientId], references: [id])
 
+  // Set when the payment was made to a business handle/storefront. Classifies
+  // this as business money (separate analytics/statements from personal).
+  merchantProfileId String?
+  merchantProfile   MerchantProfile? @relation("MerchantInvoices", fields: [merchantProfileId], references: [id])
+
   recipientPhone String?
   recipientName  String?
 
@@ -714,6 +750,7 @@ model PaymentInvoice {
   ledgerEntries Ledger[]
 
   @@index([recipientId])
+  @@index([merchantProfileId])
   @@index([status])
   @@index([reference])
   @@index([currencyId])

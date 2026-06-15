@@ -149,6 +149,9 @@ export class ProcessPaymentUseCase {
     // These override auto-detection in the Netwalletpay provider.
     let payoutProviderCode: string | null = dto.payoutProviderCode ?? null;
     let recipientCountry: string | null = null;
+    // Set when paying a business storefront handle — tags the invoice as
+    // business money (separate analytics/statements from personal receipts).
+    let merchantProfileId: string | null = null;
 
     if (dto.flow === FlowType.DIRECT) {
       if (!dto.recipientPhone) {
@@ -165,30 +168,69 @@ export class ProcessPaymentUseCase {
 
       const identity = await this.prisma.paymentIdentity.findUnique({
         where: { handle: normalizedHandle },
-        include: { user: true },
+        include: {
+          user: true,
+          merchantProfile: true,
+          payoutSetting: { include: { provider: true, country: true } },
+        },
       });
 
-      if (!identity || !identity.user) {
+      if (!identity) {
         throw new BadRequestException('Invalid recipient handle');
       }
 
-      const recipientUser = identity.user;
-      recipient = recipientUser;
+      if (identity.kind === 'MERCHANT') {
+        // Business storefront handle — money/ownership go to the owning user,
+        // but the invoice is tagged with the merchant profile (business money)
+        // and settles to the business payout setting.
+        if (!identity.merchantProfile) {
+          throw new BadRequestException('Invalid merchant handle');
+        }
 
-      const payoutSetting =
-        await this.userSettings.getPrimaryVerifiedPayoutSetting(recipientUser.id);
+        const owner = await this.prisma.user.findUnique({
+          where: { id: identity.merchantProfile.userId },
+        });
+        if (!owner) {
+          throw new BadRequestException('Merchant owner not found');
+        }
 
-      if (!payoutSetting) {
-        throw new BadRequestException(
-          'Recipient has no verified primary payout setting',
-        );
+        const payoutSetting = identity.payoutSetting;
+        if (!payoutSetting || !payoutSetting.isVerified) {
+          throw new BadRequestException(
+            'This business handle has no verified payout setting',
+          );
+        }
+
+        recipient = owner;
+        merchantProfileId = identity.merchantProfileId;
+        payoutMethod = payoutSetting.paymentMethod;
+        recipientPhone = payoutSetting.phone;
+        payoutProviderCode = payoutSetting.provider.providerCode;
+        recipientCountry = payoutSetting.country.iso2;
+        recipientName = identity.merchantProfile.businessName;
+      } else {
+        if (!identity.user) {
+          throw new BadRequestException('Invalid recipient handle');
+        }
+
+        const recipientUser = identity.user;
+        recipient = recipientUser;
+
+        const payoutSetting =
+          await this.userSettings.getPrimaryVerifiedPayoutSetting(recipientUser.id);
+
+        if (!payoutSetting) {
+          throw new BadRequestException(
+            'Recipient has no verified primary payout setting',
+          );
+        }
+
+        payoutMethod = payoutSetting.paymentMethod;
+        recipientPhone = payoutSetting.phone;
+        payoutProviderCode = payoutSetting.provider.providerCode;
+        recipientCountry = payoutSetting.country.iso2;
+        recipientName = `${recipientUser.firstName} ${recipientUser.lastName}`;
       }
-
-      payoutMethod = payoutSetting.paymentMethod;
-      recipientPhone = payoutSetting.phone;
-      payoutProviderCode = payoutSetting.provider.providerCode;
-      recipientCountry = payoutSetting.country.iso2;
-      recipientName = `${recipientUser.firstName} ${recipientUser.lastName}`;
     }
 
     // ============================
@@ -215,6 +257,9 @@ export class ProcessPaymentUseCase {
         payoutProviderCode,
         flow: dto.flow,
         recipient: recipient ? { connect: { id: recipient.id } } : undefined,
+        merchantProfile: merchantProfileId
+          ? { connect: { id: merchantProfileId } }
+          : undefined,
         recipientPhone,
         recipientName,
         createdBy: isGuest ? undefined : { connect: { id: userId } },

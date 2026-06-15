@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -81,5 +82,14 @@ export class PaymentSettingsController {
       user.userId,
       settingId,
     );
+  }
+
+  @Delete('mobile-money/:id')
+  @ApiOperation({ summary: 'Remove a payout number' })
+  removeMobileMoneyNumber(
+    @CurrentUser() user: { userId: string },
+    @Param('id') settingId: string,
+  ) {
+    return this.userSettings.removeMobileMoneyNumber(user.userId, settingId);
   }
 }
