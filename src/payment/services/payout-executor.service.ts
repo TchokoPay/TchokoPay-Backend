@@ -36,6 +36,7 @@ export class PayoutExecutorService {
         quote: {
           include: { baseCurrency: true, targetCurrency: true },
         },
+        merchantPaymentLink: { select: { autoRoutePayout: true } },
       },
     });
 
@@ -45,6 +46,15 @@ export class PayoutExecutorService {
     }
     if (!invoice.quote) {
       this.logger.error(`No quote on invoice ${invoiceId}`);
+      return null;
+    }
+
+    // HOLD instead of auto-route: payment-link collections (with auto-route off)
+    // are held to the merchant's wallet for later admin-approved cash-out.
+    const heldByLink =
+      invoice.merchantPaymentLink != null && !invoice.merchantPaymentLink.autoRoutePayout;
+    if (heldByLink) {
+      await this.holdToWallet(invoice, invoice.quote);
       return null;
     }
 
@@ -406,6 +416,70 @@ export class PayoutExecutorService {
       const recipientWallet = await this.getOrCreateWallet(invoice.recipientId, quote.targetCurrencyId);
       await this.createLedgerEntry(recipientWallet, transaction, invoice, quote.targetAmount, LedgerEntryType.CREDIT);
     }
+  }
+
+  /**
+   * Hold a confirmed collection to the merchant's wallet instead of paying out.
+   * Idempotent via the per-invoice ledger CREDIT.
+   */
+  private async holdToWallet(invoice: any, quote: any): Promise<void> {
+    if (!invoice.recipientId) {
+      this.logger.warn(`Held invoice ${invoice.id} has no recipient — cannot credit wallet`);
+      return;
+    }
+
+    const alreadyHeld = await this.prisma.ledger.findFirst({
+      where: { invoiceId: invoice.id, type: LedgerEntryType.CREDIT },
+      select: { id: true },
+    });
+    if (alreadyHeld) {
+      this.logger.warn(`Invoice ${invoice.id} already held — skipping`);
+      return;
+    }
+
+    const amount = new Prisma.Decimal(quote.targetAmount);
+    const wallet = await this.getOrCreateWallet(invoice.recipientId, quote.targetCurrencyId);
+
+    const updated = await this.prisma.wallet.update({
+      where: { id: wallet.id },
+      data: {
+        availableBalance: { increment: amount },
+        totalVolume: { increment: amount },
+      },
+    });
+
+    await this.prisma.ledger.create({
+      data: {
+        wallet: { connect: { id: wallet.id } },
+        invoice: { connect: { id: invoice.id } },
+        amount,
+        type: LedgerEntryType.CREDIT,
+        balanceAfter: updated.availableBalance,
+      },
+    });
+
+    await this.prisma.paymentInvoice.update({
+      where: { id: invoice.id },
+      data: { status: TransactionStatus.SUCCESS },
+    });
+
+    this.logger.log(
+      `🔒 Held ${amount.toString()} ${quote.targetCurrency.code} to wallet for invoice ${invoice.reference}`,
+    );
+
+    this.paymentEventService.emitPaymentComplete({
+      invoiceId: invoice.id,
+      invoiceReference: invoice.reference,
+      status: 'SUCCESS',
+      stage: 'COMPLETED',
+      paymentMethod: invoice.paymentMethod as string,
+      payoutMethod: invoice.payoutMethod,
+      amount: Number(quote.baseAmount),
+      currency: quote.baseCurrency.code,
+      payoutDetails: { status: 'HELD' },
+      timestamp: new Date(),
+      userId: invoice.createdById ?? undefined,
+    });
   }
 
   private async getOrCreateWallet(userId: string, currencyId: string) {

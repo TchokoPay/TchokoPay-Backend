@@ -1,11 +1,19 @@
 /* eslint-disable prettier/prettier */
-import { Body, Controller, Get, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, Req,
+  UploadedFile, UseGuards, UseInterceptors,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import * as multer from 'multer';
 import { Request } from 'express';
 
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 import { MerchantService } from './merchant.service.js';
+import { MerchantPaymentLinkService } from './merchant-payment-link.service.js';
 import { ApplyMerchantDto } from './dto/apply-merchant.dto.js';
+import { CreatePaymentLinkDto } from './dto/create-payment-link.dto.js';
+import { CreateEventDto } from './dto/create-event.dto.js';
 
 interface AuthRequest extends Request {
   user: {
@@ -19,7 +27,10 @@ interface AuthRequest extends Request {
 @UseGuards(JwtAuthGuard)
 @Controller('merchant')
 export class MerchantController {
-  constructor(private readonly merchant: MerchantService) {}
+  constructor(
+    private readonly merchant: MerchantService,
+    private readonly paymentLinks: MerchantPaymentLinkService,
+  ) {}
 
   @Get('me')
   @ApiOperation({ summary: 'Get my merchant profile/application status' })
@@ -40,6 +51,12 @@ export class MerchantController {
     return this.merchant.getAnalytics(req.user.userId, period);
   }
 
+  @Get('wallet')
+  @ApiOperation({ summary: 'Get my merchant wallet balance (held funds for cash-out)' })
+  getWallet(@Req() req: AuthRequest) {
+    return this.merchant.getWallet(req.user.userId);
+  }
+
   @Get('handle')
   @ApiOperation({ summary: 'Get my business storefront handle + payout' })
   getMyHandle(@Req() req: AuthRequest) {
@@ -56,5 +73,88 @@ export class MerchantController {
   @ApiOperation({ summary: 'Change which payout number my business handle settles to' })
   updateHandlePayout(@Req() req: AuthRequest, @Body() body: { payoutSettingId: string }) {
     return this.merchant.updateHandlePayout(req.user.userId, body.payoutSettingId);
+  }
+
+  // ── Payment links ──────────────────────────────────────────────────────────
+
+  @Get('payment-links')
+  @ApiOperation({ summary: 'List my payment-collection links' })
+  listPaymentLinks(@Req() req: AuthRequest) {
+    return this.paymentLinks.list(req.user.userId, 'LINK');
+  }
+
+  @Post('payment-links')
+  @ApiOperation({ summary: 'Create a payment-collection link' })
+  createPaymentLink(@Req() req: AuthRequest, @Body() dto: CreatePaymentLinkDto) {
+    return this.paymentLinks.create(req.user.userId, dto);
+  }
+
+  @Get('payment-links/:id')
+  @ApiOperation({ summary: 'Get one of my payment links' })
+  getPaymentLink(@Req() req: AuthRequest, @Param('id') id: string) {
+    return this.paymentLinks.getOne(req.user.userId, id);
+  }
+
+  @Get('payment-links/:id/payments')
+  @ApiOperation({ summary: 'List payers/payments for one of my links' })
+  getPaymentLinkPayments(@Req() req: AuthRequest, @Param('id') id: string) {
+    return this.paymentLinks.getPayments(req.user.userId, id);
+  }
+
+  @Patch('payment-links/:id/active')
+  @ApiOperation({ summary: 'Activate or deactivate a payment link' })
+  setPaymentLinkActive(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+    @Body() body: { isActive: boolean },
+  ) {
+    return this.paymentLinks.setActive(req.user.userId, id, body.isActive);
+  }
+
+  // ── Events ───────────────────────────────────────────────────────────────
+
+  @Get('events')
+  @ApiOperation({ summary: 'List my events' })
+  listEvents(@Req() req: AuthRequest) {
+    return this.paymentLinks.list(req.user.userId, 'EVENT');
+  }
+
+  @Post('events')
+  @ApiOperation({ summary: 'Create an event' })
+  createEvent(@Req() req: AuthRequest, @Body() dto: CreateEventDto) {
+    return this.paymentLinks.createEvent(req.user.userId, dto);
+  }
+
+  @Get('events/:id/payments')
+  @ApiOperation({ summary: 'List attendees/registrations for one of my events' })
+  getEventAttendees(@Req() req: AuthRequest, @Param('id') id: string) {
+    return this.paymentLinks.getPayments(req.user.userId, id);
+  }
+
+  @Patch('events/:id/active')
+  @ApiOperation({ summary: 'Activate or deactivate an event' })
+  setEventActive(@Req() req: AuthRequest, @Param('id') id: string, @Body() body: { isActive: boolean }) {
+    return this.paymentLinks.setActive(req.user.userId, id, body.isActive);
+  }
+
+  @Post('events/image')
+  @ApiOperation({ summary: 'Upload an event image (cover or logo) — returns its URL' })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 4 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const ok = ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype);
+        cb(ok ? null : new BadRequestException('Only JPG, PNG, WEBP allowed'), ok);
+      },
+    }),
+  )
+  uploadEventImage(
+    @Req() req: AuthRequest,
+    @UploadedFile() file: Express.Multer.File,
+    @Query('kind') kind?: 'cover' | 'logo',
+  ) {
+    return this.paymentLinks.uploadImage(req.user.userId, file, kind === 'logo' ? 'logo' : 'cover');
   }
 }

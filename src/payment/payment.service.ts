@@ -99,6 +99,19 @@ export class PaymentService {
           select: { id: true, firstName: true, lastName: true, paymentIdentity: true },
         },
         paymentLink: true,
+        merchantPaymentLink: {
+          select: {
+            kind: true,
+            reason: true,
+            slug: true,
+            title: true,
+            eventType: true,
+            logoUrl: true,
+            baseAmount: true,
+            baseCurrency: { select: { code: true, symbol: true } },
+          },
+        },
+        merchantProfile: { select: { businessName: true } },
         quote: {
           include: { baseCurrency: true, targetCurrency: true },
         },

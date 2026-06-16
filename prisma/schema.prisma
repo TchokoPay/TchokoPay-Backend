@@ -257,6 +257,8 @@ model MerchantProfile {
   paymentIdentity PaymentIdentity?
   // Payments received by this business (PaymentInvoice tagged with this profile).
   invoices        PaymentInvoice[] @relation("MerchantInvoices")
+  // Reusable payment-collection links owned by this business.
+  paymentLinks    MerchantPaymentLink[] @relation("MerchantPaymentLinks")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -296,6 +298,8 @@ model Currency {
   quotes Quote[] @relation("BaseCurrency")
 
   quotesAsTarget Quote[] @relation("TargetCurrency")
+
+  paymentLinkBases MerchantPaymentLink[] @relation("PaymentLinkBaseCurrency")
 
   countries Country[]
 
@@ -496,6 +500,9 @@ model Wallet {
   totalProcessed  Decimal  @default(0)
   totalVolume     Decimal  @default(0)
   totalFeesEarned Decimal  @default(0)
+  // Spendable balance: held funds (e.g. payment-link collections) awaiting
+  // cash-out. Credited on held collection, debited on approved withdrawal.
+  availableBalance Decimal @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -726,6 +733,13 @@ model PaymentInvoice {
   merchantProfileId String?
   merchantProfile   MerchantProfile? @relation("MerchantInvoices", fields: [merchantProfileId], references: [id])
 
+  // Set when the payment came through a merchant payment-collection link.
+  paymentLinkId       String?
+  merchantPaymentLink MerchantPaymentLink? @relation("PaymentLinkInvoices", fields: [paymentLinkId], references: [id])
+  // Optional payer identity captured on the public link checkout.
+  payerName  String?
+  payerEmail String?
+
   recipientPhone String?
   recipientName  String?
 
@@ -751,6 +765,7 @@ model PaymentInvoice {
 
   @@index([recipientId])
   @@index([merchantProfileId])
+  @@index([paymentLinkId])
   @@index([status])
   @@index([reference])
   @@index([currencyId])
@@ -1032,6 +1047,54 @@ model PaymentLink {
   expiresAt DateTime?
 
   @@index([url])
+}
+
+enum PaymentLinkKind {
+  LINK
+  EVENT
+}
+
+/// A merchant's reusable payment-collection link: one link, many payers.
+/// Payers each pay the equivalent of `baseAmount` in `baseCurrency`; every
+/// payment becomes a PaymentInvoice tagged with this link. With kind=EVENT it
+/// also carries event identity (title, type, branding) for a registration page.
+model MerchantPaymentLink {
+  id String @id @default(uuid())
+
+  merchantProfileId String
+  merchantProfile   MerchantProfile @relation("MerchantPaymentLinks", fields: [merchantProfileId], references: [id], onDelete: Cascade)
+
+  slug String @unique // short unguessable token used in the public URL
+
+  kind PaymentLinkKind @default(LINK)
+
+  reason      String // LINK: headline ("Rent Collection"). EVENT: what to collect ("Registration").
+  description String?
+
+  // EVENT-only identity/branding
+  eventType     String? // CONFERENCE, SEMINAR, WORKSHOP, ...
+  title         String? // "Bitcoin Kids 2025"
+  coverImageUrl String?
+  logoUrl       String?
+
+  baseCurrencyId String
+  baseCurrency   Currency @relation("PaymentLinkBaseCurrency", fields: [baseCurrencyId], references: [id])
+  baseAmount     Decimal // fixed amount in the base currency
+
+  // When false (default) payments are held to the merchant wallet for later
+  // admin-approved cash-out; when true they auto-route to the payout number.
+  autoRoutePayout Boolean @default(false)
+
+  isActive  Boolean   @default(true)
+  expiresAt DateTime?
+
+  invoices PaymentInvoice[] @relation("PaymentLinkInvoices")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([merchantProfileId])
+  @@index([slug])
 }
 
 /**

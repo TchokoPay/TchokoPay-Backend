@@ -75,6 +75,21 @@ export class MerchantService {
     return primary;
   }
 
+  /** Merchant wallet: held balance available for cash-out, per settlement currency. */
+  async getWallet(userId: string) {
+    await this.requireApprovedProfile(userId);
+    const wallets = await this.prisma.wallet.findMany({
+      where: { userId },
+      select: {
+        availableBalance: true,
+        currency: { select: { code: true, symbol: true, name: true } },
+      },
+    });
+    return wallets
+      .map((w) => ({ availableBalance: Number(w.availableBalance), currency: w.currency }))
+      .filter((w) => w.availableBalance > 0);
+  }
+
   /** Returns the merchant's storefront identity (handle + payout), or null. */
   async getMyHandle(userId: string) {
     const profile = await this.prisma.merchantProfile.findUnique({ where: { userId } });
