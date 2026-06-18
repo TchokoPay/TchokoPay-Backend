@@ -301,11 +301,23 @@ export class AdminController {
     return this.admin.setMerchantAutoRoute(!!enabled);
   }
 
+  @Patch('merchant-settings/min-withdrawal')
+  @ApiOperation({ summary: 'Set the minimum withdrawal amount merchants can request' })
+  setMinWithdrawal(@Body('minWithdrawalAmount') amount: number) {
+    return this.admin.setMinWithdrawal(Number(amount));
+  }
+
   @Get('cashouts')
   @ApiOperation({ summary: 'List merchant cash-out requests' })
   @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'PAID', 'REJECTED', 'FAILED'] })
   listCashouts(@Query('status') status?: string) {
     return this.cashouts.adminList(status);
+  }
+
+  @Get('cashouts/:id')
+  @ApiOperation({ summary: 'Cash-out review detail (balance, destination, history)' })
+  getCashoutDetail(@Param('id') id: string) {
+    return this.cashouts.adminGetCashoutDetail(id);
   }
 
   @Patch('cashouts/:id/approve')

@@ -278,6 +278,54 @@ export class EmailService {
     return true;
   }
 
+  async sendWithdrawalStatusNotice(input: {
+    userId: string;
+    status: 'PAID' | 'REJECTED';
+    reference: string;
+    amount: number;
+    currency: string;
+    payoutMethod: string;
+    reason?: string | null;
+  }) {
+    const recipient = await this.getPrimaryEmailRecipient(input.userId);
+    if (!recipient) return false;
+
+    const paid = input.status === 'PAID';
+    const amountText = `${input.currency} ${new Intl.NumberFormat('en-US').format(input.amount)}`;
+    const dashboardUrl = `${this.getAppUrl()}/merchant/payouts`;
+    const title = paid ? 'Withdrawal sent ✅' : 'Withdrawal not approved';
+    const intro = paid
+      ? `Your withdrawal of ${amountText} has been approved and sent to your ${input.payoutMethod} account.`
+      : `Your withdrawal of ${amountText} was not approved${input.reason ? `: ${input.reason}` : '.'} The amount has been returned to your TchokoPay balance.`;
+
+    const html = `
+  <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#0b1640">
+    <img src="${this.getLogoUrl()}" alt="TchokoPay" width="40" height="40" style="border-radius:10px"/>
+    <h2 style="margin:18px 0 6px">${title}</h2>
+    <p style="color:#475569;line-height:1.5">Hi ${recipient.firstName || 'there'}, ${intro}</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px">
+      <tr><td style="color:#64748b;padding:6px 0">Amount</td><td style="text-align:right;font-weight:700">${amountText}</td></tr>
+      <tr><td style="color:#64748b;padding:6px 0">Reference</td><td style="text-align:right;font-family:monospace">${input.reference}</td></tr>
+      <tr><td style="color:#64748b;padding:6px 0">Status</td><td style="text-align:right;font-weight:700;color:${paid ? '#059669' : '#dc2626'}">${paid ? 'Paid' : 'Rejected'}</td></tr>
+    </table>
+    <a href="${dashboardUrl}" style="display:inline-block;background:#1946dc;color:#fff;text-decoration:none;padding:10px 18px;border-radius:10px;font-weight:600">View payouts</a>
+  </div>`;
+
+    const text = `${title}\n\n${intro}\n\nAmount: ${amountText}\nReference: ${input.reference}\n\n${dashboardUrl}`;
+
+    await this.sendEmail({
+      to: recipient.email,
+      subject: paid ? `Your withdrawal of ${amountText} is on its way` : 'Your withdrawal was not approved',
+      html,
+      text,
+      tags: [
+        { name: 'category', value: 'withdrawals' },
+        { name: 'status', value: input.status.toLowerCase() },
+      ],
+    });
+    return true;
+  }
+
   private async sendEmail(input: EmailSendInput) {
     const apiKey = this.configService.get<string>('RESEND_API_KEY', '');
     const from = this.configService.get<string>(

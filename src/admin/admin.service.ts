@@ -40,13 +40,20 @@ export class AdminService {
 
   // ── Platform settings (merchant payout routing) ─────────────────────────────
 
+  private shapeMerchantSettings(cfg: { merchantAutoRoutePayout: boolean; minWithdrawalAmount: number }) {
+    return {
+      merchantAutoRoutePayout: cfg.merchantAutoRoutePayout,
+      minWithdrawalAmount: cfg.minWithdrawalAmount,
+    };
+  }
+
   async getMerchantSettings() {
     const cfg = await this.prisma.platformConfig.upsert({
       where: { id: 'singleton' },
       update: {},
       create: { id: 'singleton' },
     });
-    return { merchantAutoRoutePayout: cfg.merchantAutoRoutePayout };
+    return this.shapeMerchantSettings(cfg);
   }
 
   async setMerchantAutoRoute(enabled: boolean) {
@@ -55,7 +62,17 @@ export class AdminService {
       update: { merchantAutoRoutePayout: enabled },
       create: { id: 'singleton', merchantAutoRoutePayout: enabled },
     });
-    return { merchantAutoRoutePayout: cfg.merchantAutoRoutePayout };
+    return this.shapeMerchantSettings(cfg);
+  }
+
+  async setMinWithdrawal(amount: number) {
+    const min = Math.max(0, Math.round(Number(amount) || 0));
+    const cfg = await this.prisma.platformConfig.upsert({
+      where: { id: 'singleton' },
+      update: { minWithdrawalAmount: min },
+      create: { id: 'singleton', minWithdrawalAmount: min },
+    });
+    return this.shapeMerchantSettings(cfg);
   }
 
   // ── Audit ─────────────────────────────────────────────────────────────────

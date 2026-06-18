@@ -1112,6 +1112,9 @@ model PlatformConfig {
   // admin-approved cash-out; when true merchant payments auto-route on receipt.
   merchantAutoRoutePayout Boolean @default(false)
 
+  // Minimum amount a merchant can request to withdraw (settlement currency).
+  minWithdrawalAmount Int @default(500)
+
   updatedAt DateTime @updatedAt
 }
 

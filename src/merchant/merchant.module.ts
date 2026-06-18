@@ -8,9 +8,10 @@ import { PrismaModule } from '../../prisma/prisma.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { QuoteModule } from '../quote/quote.module.js';
 import { PaymentModule } from '../payment/payment.module.js';
+import { EmailModule } from '../email/email.module.js';
 
 @Module({
-  imports: [PrismaModule, UsersModule, QuoteModule, PaymentModule],
+  imports: [PrismaModule, UsersModule, QuoteModule, PaymentModule, EmailModule],
   controllers: [MerchantController, PaymentLinkPublicController],
   providers: [MerchantService, MerchantPaymentLinkService, MerchantCashoutService],
   exports: [MerchantService, MerchantPaymentLinkService, MerchantCashoutService],
