@@ -44,6 +44,7 @@ import { PaymentEventService } from './services/payment-event.service.js';
 import { PayoutExecutorService } from './services/payout-executor.service.js';
 import { PaymentPollingService } from './services/payment-polling.service.js';
 import { PaymentGateway } from './gateways/payment.gateway.js';
+import { EmailModule } from '../email/email.module.js';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     AuthModule,
     HttpModule,
     ConfigModule,
+    EmailModule,
     EventEmitterModule.forRoot(),
   ],
   controllers: [PaymentController, WebhookController],

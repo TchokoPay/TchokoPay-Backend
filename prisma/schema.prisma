@@ -1084,6 +1084,14 @@ model MerchantPaymentLink {
   coverImageUrl String?
   logoUrl       String?
 
+  // Optional merchant customization of the post-payment confirmation email.
+  // When null, the branded default is sent. A "Powered by TchokoPay" footer is
+  // always appended regardless.
+  confirmEmailSubject        String?
+  confirmEmailMessage        String? // merchant's own body content (plain text / light markup)
+  confirmEmailAttachmentUrl  String? // e.g. a ticket / receipt PDF to attach
+  confirmEmailAttachmentName String?
+
   baseCurrencyId String
   baseCurrency   Currency @relation("PaymentLinkBaseCurrency", fields: [baseCurrencyId], references: [id])
   baseAmount     Decimal // fixed amount in the base currency

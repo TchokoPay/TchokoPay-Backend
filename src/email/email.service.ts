@@ -24,6 +24,7 @@ type EmailSendInput = {
   html: string;
   text: string;
   tags?: { name: string; value: string }[];
+  attachments?: { filename: string; path: string }[];
 };
 
 @Injectable()
@@ -326,6 +327,83 @@ export class EmailService {
     return true;
   }
 
+  private escapeHtml(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /**
+   * Sent to the payer's email after they pay for an event. Uses the merchant's
+   * custom subject/message/attachment when set, otherwise a branded default.
+   * A "Powered by TchokoPay" footer is always appended.
+   */
+  async sendEventRegistrationEmail(input: {
+    to: string;
+    payerName?: string | null;
+    eventTitle: string;
+    businessName: string;
+    amount: number;
+    currency: string;
+    reference: string;
+    coverImageUrl?: string | null;
+    logoUrl?: string | null;
+    customSubject?: string | null;
+    customMessage?: string | null;
+    attachmentUrl?: string | null;
+    attachmentName?: string | null;
+  }) {
+    if (!input.to?.includes('@')) return false;
+
+    const amountText = `${input.currency} ${new Intl.NumberFormat('en-US').format(input.amount)}`;
+    const subject = input.customSubject?.trim() || `You're registered for ${input.eventTitle}`;
+    const greeting = input.payerName ? `Hi ${this.escapeHtml(input.payerName)},` : 'Hi,';
+    const bodyHtml = input.customMessage?.trim()
+      ? this.escapeHtml(input.customMessage).replace(/\n/g, '<br/>')
+      : `Your payment of ${amountText} for <strong>${this.escapeHtml(input.eventTitle)}</strong> has been received. You're all set &mdash; see you there!`;
+
+    const cover = input.coverImageUrl
+      ? `<img src="${input.coverImageUrl}" alt="" width="520" style="width:100%;max-width:520px;border-radius:14px;display:block;margin-bottom:18px"/>`
+      : '';
+    const logo = input.logoUrl
+      ? `<img src="${input.logoUrl}" alt="" width="44" height="44" style="border-radius:11px;vertical-align:middle"/>`
+      : '';
+
+    const html = `
+  <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#0b1640">
+    ${cover}
+    <div style="margin-bottom:10px">${logo}<span style="font-weight:700;font-size:15px;vertical-align:middle;margin-left:8px">${this.escapeHtml(input.businessName)}</span></div>
+    <span style="display:inline-block;background:#10b98122;color:#059669;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px">Payment received</span>
+    <h2 style="margin:14px 0 6px">${this.escapeHtml(subject)}</h2>
+    <p style="color:#475569;line-height:1.55">${greeting}</p>
+    <p style="color:#475569;line-height:1.55">${bodyHtml}</p>
+    <table style="width:100%;border-collapse:collapse;margin:18px 0;font-size:14px">
+      <tr><td style="color:#64748b;padding:6px 0">Event</td><td style="text-align:right;font-weight:700">${this.escapeHtml(input.eventTitle)}</td></tr>
+      <tr><td style="color:#64748b;padding:6px 0">Amount paid</td><td style="text-align:right;font-weight:700">${amountText}</td></tr>
+      <tr><td style="color:#64748b;padding:6px 0">Reference</td><td style="text-align:right;font-family:monospace">${input.reference}</td></tr>
+    </table>
+    ${input.attachmentUrl ? `<p style="color:#475569;font-size:13px">&#128206; Your ${this.escapeHtml(input.attachmentName || 'document')} is attached.</p>` : ''}
+    <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0"/>
+    <p style="color:#94a3b8;font-size:12px;text-align:center;margin:0">Powered by <a href="${this.getAppUrl()}" style="color:#1946dc;text-decoration:none;font-weight:600">TchokoPay</a></p>
+  </div>`;
+
+    const text = `${subject}\n\n${input.payerName ? `Hi ${input.payerName},\n` : ''}Your payment of ${amountText} for ${input.eventTitle} has been received.\nReference: ${input.reference}\n\nPowered by TchokoPay`;
+
+    await this.sendEmail({
+      to: input.to,
+      subject,
+      html,
+      text,
+      tags: [{ name: 'category', value: 'event-registration' }],
+      attachments: input.attachmentUrl
+        ? [{ filename: input.attachmentName || 'attachment.pdf', path: input.attachmentUrl }]
+        : undefined,
+    });
+    return true;
+  }
+
   private async sendEmail(input: EmailSendInput) {
     const apiKey = this.configService.get<string>('RESEND_API_KEY', '');
     const from = this.configService.get<string>(
@@ -356,6 +434,7 @@ export class EmailService {
         html: input.html,
         text: input.text,
         tags: input.tags,
+        attachments: input.attachments,
       }),
     });
 

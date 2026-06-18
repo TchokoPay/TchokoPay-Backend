@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { PaymentProviderFactory } from '../providers/payment-provider.factory.js';
 import { PaymentEventService } from './payment-event.service.js';
+import { EmailService } from '../../email/email.service.js';
 
 @Injectable()
 export class PayoutExecutorService {
@@ -18,6 +19,7 @@ export class PayoutExecutorService {
     private prisma: PrismaService,
     private providerFactory: PaymentProviderFactory,
     private paymentEventService: PaymentEventService,
+    private emailService: EmailService,
   ) {}
 
   /**
@@ -36,7 +38,21 @@ export class PayoutExecutorService {
         quote: {
           include: { baseCurrency: true, targetCurrency: true },
         },
-        merchantPaymentLink: { select: { autoRoutePayout: true } },
+        merchantPaymentLink: {
+          select: {
+            autoRoutePayout: true,
+            kind: true,
+            title: true,
+            reason: true,
+            coverImageUrl: true,
+            logoUrl: true,
+            confirmEmailSubject: true,
+            confirmEmailMessage: true,
+            confirmEmailAttachmentUrl: true,
+            confirmEmailAttachmentName: true,
+            merchantProfile: { select: { businessName: true } },
+          },
+        },
       },
     });
 
@@ -166,6 +182,9 @@ export class PayoutExecutorService {
       });
 
       await this.recordTransaction(invoice, quote);
+
+      // Event payer just registered (auto-route path) — send their confirmation.
+      this.notifyEventRegistration(invoice, quote);
 
       this.logger.log(`✅ Payout dispatched for ${invoice.reference} → txId: ${payoutExternalRef}`);
 
@@ -511,6 +530,9 @@ export class PayoutExecutorService {
       timestamp: new Date(),
       userId: invoice.createdById ?? undefined,
     });
+
+    // Event payer just registered (held path) — send their confirmation.
+    this.notifyEventRegistration(invoice, quote);
   }
 
   private async getOrCreateWallet(userId: string, currencyId: string) {
@@ -570,6 +592,29 @@ export class PayoutExecutorService {
       orderBy: { priority: 'desc' },
     });
     return cfg ? Number(cfg.feePercent) : 0;
+  }
+
+  /** Email the payer their event registration confirmation (best-effort, fire-and-forget). */
+  private notifyEventRegistration(invoice: any, quote: any) {
+    const link = invoice.merchantPaymentLink;
+    if (link?.kind !== 'EVENT' || !invoice.payerEmail) return;
+    void this.emailService
+      .sendEventRegistrationEmail({
+        to: invoice.payerEmail,
+        payerName: invoice.payerName,
+        eventTitle: link.title || link.reason || 'the event',
+        businessName: link.merchantProfile?.businessName ?? 'TchokoPay',
+        amount: Number(quote.baseAmount),
+        currency: quote.baseCurrency.code,
+        reference: invoice.reference,
+        coverImageUrl: link.coverImageUrl,
+        logoUrl: link.logoUrl,
+        customSubject: link.confirmEmailSubject,
+        customMessage: link.confirmEmailMessage,
+        attachmentUrl: link.confirmEmailAttachmentUrl,
+        attachmentName: link.confirmEmailAttachmentName,
+      })
+      .catch((e) => this.logger.warn(`Event email failed for ${invoice.reference}: ${e instanceof Error ? e.message : e}`));
   }
 
   private mapPayoutMethod(method: string): PayoutMethod {

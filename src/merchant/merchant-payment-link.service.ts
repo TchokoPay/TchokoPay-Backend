@@ -33,6 +33,10 @@ const LINK_SELECT = {
   isActive: true,
   expiresAt: true,
   createdAt: true,
+  confirmEmailSubject: true,
+  confirmEmailMessage: true,
+  confirmEmailAttachmentUrl: true,
+  confirmEmailAttachmentName: true,
   baseCurrency: { select: { code: true, symbol: true, name: true } },
   _count: { select: { invoices: true } },
 } satisfies Prisma.MerchantPaymentLinkSelect;
@@ -104,6 +108,10 @@ export class MerchantPaymentLinkService {
       expired: link.expiresAt ? link.expiresAt.getTime() < Date.now() : false,
       paymentCount: link._count.invoices,
       createdAt: link.createdAt,
+      confirmEmailSubject: link.confirmEmailSubject,
+      confirmEmailMessage: link.confirmEmailMessage,
+      confirmEmailAttachmentUrl: link.confirmEmailAttachmentUrl,
+      confirmEmailAttachmentName: link.confirmEmailAttachmentName,
     };
   }
 
@@ -152,6 +160,44 @@ export class MerchantPaymentLinkService {
       },
     );
     return { url: result.secure_url as string };
+  }
+
+  /** Upload an attachment (e.g. ticket/receipt PDF) for the event confirmation email. */
+  async uploadAttachment(userId: string, file: Express.Multer.File) {
+    await this.requireApprovedProfile(userId);
+    if (!file) throw new BadRequestException('No file uploaded');
+
+    const result = await cloudinary.uploader.upload(
+      `data:${file.mimetype};base64,${file.buffer.toString('base64')}`,
+      { folder: `tchokopay/events/${userId}/attachments`, resource_type: 'auto' },
+    );
+    return { url: result.secure_url as string, name: file.originalname || 'attachment' };
+  }
+
+  /** Update the merchant's custom confirmation-email content for an event. */
+  async updateConfirmEmail(
+    userId: string,
+    id: string,
+    dto: { subject?: string | null; message?: string | null; attachmentUrl?: string | null; attachmentName?: string | null },
+  ) {
+    const profile = await this.requireApprovedProfile(userId);
+    const existing = await this.prisma.merchantPaymentLink.findFirst({
+      where: { id, merchantProfileId: profile.id },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Event not found');
+
+    const link = await this.prisma.merchantPaymentLink.update({
+      where: { id },
+      data: {
+        confirmEmailSubject: dto.subject?.trim() || null,
+        confirmEmailMessage: dto.message?.trim() || null,
+        confirmEmailAttachmentUrl: dto.attachmentUrl?.trim() || null,
+        confirmEmailAttachmentName: dto.attachmentName?.trim() || null,
+      },
+      select: LINK_SELECT,
+    });
+    return this.shape(link);
   }
 
   /** Create an EVENT (a payment link with event identity + branding). */

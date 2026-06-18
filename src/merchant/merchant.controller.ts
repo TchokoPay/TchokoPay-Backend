@@ -179,4 +179,31 @@ export class MerchantController {
   ) {
     return this.paymentLinks.uploadImage(req.user.userId, file, kind === 'logo' ? 'logo' : 'cover');
   }
+
+  @Patch('events/:id/email')
+  @ApiOperation({ summary: 'Customize the post-payment confirmation email for an event' })
+  updateEventEmail(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+    @Body() body: { subject?: string; message?: string; attachmentUrl?: string | null; attachmentName?: string | null },
+  ) {
+    return this.paymentLinks.updateConfirmEmail(req.user.userId, id, body);
+  }
+
+  @Post('events/attachment')
+  @ApiOperation({ summary: 'Upload an attachment (e.g. ticket/receipt) for the event email' })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 8 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const ok = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype);
+        cb(ok ? null : new BadRequestException('Only PDF, JPG, PNG, WEBP allowed'), ok);
+      },
+    }),
+  )
+  uploadEventAttachment(@Req() req: AuthRequest, @UploadedFile() file: Express.Multer.File) {
+    return this.paymentLinks.uploadAttachment(req.user.userId, file);
+  }
 }
