@@ -5,9 +5,10 @@ import { AdminService } from './admin.service.js';
 import { AdminGuard } from './guards/admin.guard.js';
 import { PrismaModule } from '../../prisma/prisma.module.js';
 import { PaymentModule } from '../payment/payment.module.js';
+import { MerchantModule } from '../merchant/merchant.module.js';
 
 @Module({
-  imports: [PrismaModule, ConfigModule, PaymentModule],
+  imports: [PrismaModule, ConfigModule, PaymentModule, MerchantModule],
   controllers: [AdminController],
   providers: [AdminService, AdminGuard],
   exports: [AdminGuard, AdminService],

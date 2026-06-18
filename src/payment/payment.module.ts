@@ -87,6 +87,6 @@ import { PaymentGateway } from './gateways/payment.gateway.js';
     // Guards
     VelocityGuard,
   ],
-  exports: [PaymentService, NetwalletpayProvider, ZikoPayProvider],
+  exports: [PaymentService, NetwalletpayProvider, ZikoPayProvider, PaymentProviderFactory],
 })
 export class PaymentModule {}

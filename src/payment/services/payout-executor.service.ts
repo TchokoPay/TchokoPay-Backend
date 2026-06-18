@@ -49,13 +49,20 @@ export class PayoutExecutorService {
       return null;
     }
 
-    // HOLD instead of auto-route: payment-link collections (with auto-route off)
-    // are held to the merchant's wallet for later admin-approved cash-out.
-    const heldByLink =
-      invoice.merchantPaymentLink != null && !invoice.merchantPaymentLink.autoRoutePayout;
-    if (heldByLink) {
-      await this.holdToWallet(invoice, invoice.quote);
-      return null;
+    // HOLD instead of auto-route: by default ALL merchant money (any invoice
+    // tagged with a merchantProfileId) is held to the merchant's wallet for
+    // later admin-approved cash-out. Auto-routing happens only when enabled
+    // globally (admin) or per-link.
+    let isMerchantAutoPayout = false;
+    if (invoice.merchantProfileId) {
+      const config = await this.prisma.platformConfig.findUnique({ where: { id: 'singleton' } });
+      const globalAutoRoute = config?.merchantAutoRoutePayout ?? false;
+      const linkAutoRoute = invoice.merchantPaymentLink?.autoRoutePayout ?? false;
+      if (!globalAutoRoute && !linkAutoRoute) {
+        await this.holdToWallet(invoice, invoice.quote);
+        return null;
+      }
+      isMerchantAutoPayout = true;
     }
 
     // Idempotency: don't double-pay
@@ -69,16 +76,34 @@ export class PayoutExecutorService {
 
     const { quote } = invoice;
 
+    // Merchant auto-payouts carry the same withdrawal fee as a manual cash-out:
+    // the merchant receives (settled amount − fee) and the platform keeps the fee.
+    const gross = new Prisma.Decimal(quote.targetAmount);
+    let fee = new Prisma.Decimal(0);
+    if (isMerchantAutoPayout) {
+      const feePercent = await this.withdrawalFeePercent(quote.targetCurrency.code);
+      if (feePercent > 0) {
+        fee = new Prisma.Decimal(Math.round((Number(gross) * feePercent) / 100));
+      }
+    }
+    const payoutAmount = gross.sub(fee);
+    if (payoutAmount.lte(0)) {
+      this.logger.error(`Payout amount <= 0 after fee for invoice ${invoice.reference}; holding instead`);
+      await this.holdToWallet(invoice, invoice.quote);
+      return null;
+    }
+
     const payout = await this.prisma.payout.upsert({
       where: { invoiceId },
       create: {
         invoice: { connect: { id: invoiceId } },
-        amount: quote.targetAmount,
+        amount: payoutAmount,
+        fee,
         currency: quote.targetCurrency.code,
         method: this.mapPayoutMethod(invoice.payoutMethod),
         status: TransactionStatus.PROCESSING,
       },
-      update: { status: TransactionStatus.PROCESSING },
+      update: { amount: payoutAmount, fee, status: TransactionStatus.PROCESSING },
     });
 
     const payoutAttempt = await this.prisma.payoutAttempt.create({
@@ -96,7 +121,7 @@ export class PayoutExecutorService {
       );
 
       const response = await payoutProvider.payout({
-        amount: Number(quote.targetAmount),
+        amount: Number(payoutAmount),
         currency: quote.targetCurrency.code,
         phone: invoice.recipientPhone ?? undefined,
         reference: invoice.reference,
@@ -517,6 +542,19 @@ export class PayoutExecutorService {
         balanceAfter: updated.totalProcessed,
       },
     });
+  }
+
+  /** Withdrawal fee % from an admin-configured WITHDRAWAL FeeConfig (0 if none). */
+  private async withdrawalFeePercent(currencyCode: string): Promise<number> {
+    const cfg = await this.prisma.feeConfig.findFirst({
+      where: {
+        isActive: true,
+        flow: 'WITHDRAWAL',
+        OR: [{ targetCurrencyCode: currencyCode }, { targetCurrencyCode: null }],
+      },
+      orderBy: { priority: 'desc' },
+    });
+    return cfg ? Number(cfg.feePercent) : 0;
   }
 
   private mapPayoutMethod(method: string): PayoutMethod {

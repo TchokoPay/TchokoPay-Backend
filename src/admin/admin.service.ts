@@ -38,6 +38,26 @@ export class AdminService {
     private userStatusCache: UserStatusCacheService,
   ) {}
 
+  // ── Platform settings (merchant payout routing) ─────────────────────────────
+
+  async getMerchantSettings() {
+    const cfg = await this.prisma.platformConfig.upsert({
+      where: { id: 'singleton' },
+      update: {},
+      create: { id: 'singleton' },
+    });
+    return { merchantAutoRoutePayout: cfg.merchantAutoRoutePayout };
+  }
+
+  async setMerchantAutoRoute(enabled: boolean) {
+    const cfg = await this.prisma.platformConfig.upsert({
+      where: { id: 'singleton' },
+      update: { merchantAutoRoutePayout: enabled },
+      create: { id: 'singleton', merchantAutoRoutePayout: enabled },
+    });
+    return { merchantAutoRoutePayout: cfg.merchantAutoRoutePayout };
+  }
+
   // ── Audit ─────────────────────────────────────────────────────────────────
 
   async log(
@@ -421,6 +441,9 @@ export class AdminService {
             id: inv.payout.id,
             status: inv.payout.status,
             amount: this.numberValue(inv.payout.amount),
+            // Withdrawal fee withheld from a merchant auto-payout (0 otherwise).
+            fee: this.numberValue(inv.payout.fee ?? 0) ?? 0,
+            isMerchant: !!inv.merchantProfileId,
             currency: inv.payout.currency,
             method: inv.payout.method,
             provider: latestPayoutAttempt?.provider ?? inv.payoutMethod,
@@ -678,6 +701,92 @@ export class AdminService {
     );
 
     return updated;
+  }
+
+  /** Suspend (ban) or reactivate an already-reviewed merchant. */
+  async setMerchantStatus(
+    adminId: string,
+    merchantId: string,
+    action: 'SUSPEND' | 'REACTIVATE',
+    reason?: string,
+    ip?: string,
+  ) {
+    const profile = await this.prisma.merchantProfile.findUnique({ where: { id: merchantId } });
+    if (!profile) throw new NotFoundException('Merchant not found');
+
+    if (action === 'SUSPEND' && profile.status !== 'APPROVED') {
+      throw new BadRequestException('Only approved merchants can be suspended');
+    }
+    if (action === 'REACTIVATE' && profile.status !== 'SUSPENDED') {
+      throw new BadRequestException('Only suspended merchants can be reactivated');
+    }
+
+    const updated = await this.prisma.merchantProfile.update({
+      where: { id: merchantId },
+      data: {
+        status: action === 'SUSPEND' ? 'SUSPENDED' : 'APPROVED',
+        rejectionReason: action === 'SUSPEND' ? reason ?? null : null,
+        reviewedById: adminId,
+        reviewedAt: new Date(),
+      },
+    });
+
+    await this.log(
+      adminId,
+      action === 'SUSPEND' ? 'MERCHANT_SUSPENDED' : 'MERCHANT_REACTIVATED',
+      'MERCHANT',
+      merchantId,
+      { userId: profile.userId, reason },
+      ip,
+    );
+
+    return updated;
+  }
+
+  /** Full admin view of one merchant: profile + storefront + activity stats. */
+  async getMerchantDetail(merchantId: string) {
+    const profile = await this.prisma.merchantProfile.findUnique({
+      where: { id: merchantId },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, isActive: true, contacts: true } },
+        paymentIdentity: {
+          select: {
+            handle: true,
+            payoutSetting: { select: { phone: true, paymentMethod: true, isVerified: true } },
+          },
+        },
+      },
+    });
+    if (!profile) throw new NotFoundException('Merchant not found');
+
+    const [linkCount, eventCount, paid, cashoutCount, wallets] = await Promise.all([
+      this.prisma.merchantPaymentLink.count({ where: { merchantProfileId: merchantId, kind: 'LINK' } }),
+      this.prisma.merchantPaymentLink.count({ where: { merchantProfileId: merchantId, kind: 'EVENT' } }),
+      this.prisma.paymentInvoice.aggregate({
+        where: { merchantProfileId: merchantId, status: 'SUCCESS' },
+        _sum: { amount: true },
+        _count: { _all: true },
+      }),
+      this.prisma.merchantCashout.count({ where: { merchantProfileId: merchantId } }),
+      this.prisma.wallet.findMany({
+        where: { userId: profile.userId },
+        select: { availableBalance: true, currency: { select: { code: true } } },
+      }),
+    ]);
+
+    return {
+      profile,
+      stats: {
+        links: linkCount,
+        events: eventCount,
+        paymentsCount: paid._count._all,
+        collected: Number(paid._sum.amount ?? 0),
+        cashouts: cashoutCount,
+        wallets: wallets
+          .map((w) => ({ availableBalance: Number(w.availableBalance), currency: w.currency.code }))
+          .filter((w) => w.availableBalance > 0),
+      },
+    };
   }
 
   // ── Audit log ─────────────────────────────────────────────────────────────

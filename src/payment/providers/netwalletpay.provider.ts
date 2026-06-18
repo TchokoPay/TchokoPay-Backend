@@ -144,6 +144,25 @@ export class NetwalletpayProvider implements PaymentProvider {
   }
 
   /**
+   * Netwalletpay rejects order info containing non-ASCII characters with
+   * 4007 "The order information is invalid". Merchant titles/reasons are free
+   * text (em-dashes, accents, emoji…), so normalise to a safe ASCII subset and
+   * cap the length before sending. Does not affect the Hash (orderId-only).
+   */
+  private sanitizeDescription(input?: string): string {
+    const cleaned = (input ?? '')
+      .normalize('NFKD')
+      .replace(/[‐-―]/g, '-')
+      .replace(/[‘’‚‛]/g, "'")
+      .replace(/[“”„‟]/g, '"')
+      .replace(/[^\x20-\x7E]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 100);
+    return cleaned || 'TchokoPay payment';
+  }
+
+  /**
    * Mobile money and bank APIs (Airtel, MTN, M-Pesa, bank transfers) only
    * accept integer amounts. Crypto methods keep full decimal precision.
    * Uses Math.ceil for payin (payer always covers the full amount) and
@@ -222,7 +241,7 @@ export class NetwalletpayProvider implements PaymentProvider {
         CountryCode: country,
         MethodProvider: providerId,
         PhoneNumber: formattedPhone,
-        Description: data.description?.trim() || `Payment for ${reference}`,
+        Description: this.sanitizeDescription(data.description || `Payment for ${reference}`),
         CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`,
         Hash: this.computeHash(orderId),
       };
@@ -344,7 +363,7 @@ export class NetwalletpayProvider implements PaymentProvider {
         CountryCode: country,
         MethodProvider: providerId,
         PhoneNumber: formattedPhone,
-        Description: data.description?.trim() || `Payout for ${reference}`,
+        Description: this.sanitizeDescription(data.description || `Payout for ${reference}`),
         CallbackUrl: `${this.config.webhookBaseUrl}/api/v1/webhooks/netwalletpay`,
         Hash: this.computeHash(orderId),
       };

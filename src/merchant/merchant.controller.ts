@@ -11,6 +11,7 @@ import { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 import { MerchantService } from './merchant.service.js';
 import { MerchantPaymentLinkService } from './merchant-payment-link.service.js';
+import { MerchantCashoutService } from './merchant-cashout.service.js';
 import { ApplyMerchantDto } from './dto/apply-merchant.dto.js';
 import { CreatePaymentLinkDto } from './dto/create-payment-link.dto.js';
 import { CreateEventDto } from './dto/create-event.dto.js';
@@ -30,6 +31,7 @@ export class MerchantController {
   constructor(
     private readonly merchant: MerchantService,
     private readonly paymentLinks: MerchantPaymentLinkService,
+    private readonly cashouts: MerchantCashoutService,
   ) {}
 
   @Get('me')
@@ -55,6 +57,26 @@ export class MerchantController {
   @ApiOperation({ summary: 'Get my merchant wallet balance (held funds for cash-out)' })
   getWallet(@Req() req: AuthRequest) {
     return this.merchant.getWallet(req.user.userId);
+  }
+
+  // ── Cash-out ───────────────────────────────────────────────────────────────
+
+  @Get('cashout/quote')
+  @ApiOperation({ summary: 'Available balance + withdrawal fee + payout destination' })
+  quoteCashout(@Req() req: AuthRequest) {
+    return this.cashouts.quoteCashout(req.user.userId);
+  }
+
+  @Post('cashout')
+  @ApiOperation({ summary: 'Request a cash-out of held wallet funds (admin-approved)' })
+  requestCashout(@Req() req: AuthRequest, @Body() body: { amount: number }) {
+    return this.cashouts.requestCashout(req.user.userId, Number(body?.amount));
+  }
+
+  @Get('cashouts')
+  @ApiOperation({ summary: 'My cash-out request history' })
+  listCashouts(@Req() req: AuthRequest) {
+    return this.cashouts.listMyCashouts(req.user.userId);
   }
 
   @Get('handle')

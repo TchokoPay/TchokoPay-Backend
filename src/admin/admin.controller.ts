@@ -17,6 +17,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { AdminService } from './admin.service.js';
+import { MerchantCashoutService } from '../merchant/merchant-cashout.service.js';
 import { AdminGuard } from './guards/admin.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard.js';
 
@@ -27,7 +28,10 @@ type AuthenticatedRequest = { user: { userId: string }; ip?: string };
 @UseGuards(JwtAuthGuard, AdminGuard)
 @Controller('admin')
 export class AdminController {
-  constructor(private admin: AdminService) {}
+  constructor(
+    private admin: AdminService,
+    private cashouts: MerchantCashoutService,
+  ) {}
 
   // ── Overview ──────────────────────────────────────────────────────────────
 
@@ -263,6 +267,57 @@ export class AdminController {
     @Body('reason') reason?: string,
   ) {
     return this.admin.reviewMerchant(req.user.userId, merchantId, decision, reason, req.ip);
+  }
+
+  @Get('merchants/:id')
+  @ApiOperation({ summary: 'Full detail + activity stats for one merchant' })
+  getMerchantDetail(@Param('id') id: string) {
+    return this.admin.getMerchantDetail(id);
+  }
+
+  @Patch('merchants/:id/suspend')
+  @ApiOperation({ summary: 'Suspend (ban) an approved merchant' })
+  suspendMerchant(@Req() req: AuthenticatedRequest, @Param('id') id: string, @Body('reason') reason?: string) {
+    return this.admin.setMerchantStatus(req.user.userId, id, 'SUSPEND', reason, req.ip);
+  }
+
+  @Patch('merchants/:id/reactivate')
+  @ApiOperation({ summary: 'Reactivate a suspended merchant' })
+  reactivateMerchant(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.admin.setMerchantStatus(req.user.userId, id, 'REACTIVATE', undefined, req.ip);
+  }
+
+  // ── Merchant payout routing + cash-outs ──────────────────────────────────
+
+  @Get('merchant-settings')
+  @ApiOperation({ summary: 'Platform merchant settings (auto-route payout toggle)' })
+  getMerchantSettings() {
+    return this.admin.getMerchantSettings();
+  }
+
+  @Patch('merchant-settings')
+  @ApiOperation({ summary: 'Toggle whether merchant payments auto-route (vs hold to wallet)' })
+  setMerchantSettings(@Body('merchantAutoRoutePayout') enabled: boolean) {
+    return this.admin.setMerchantAutoRoute(!!enabled);
+  }
+
+  @Get('cashouts')
+  @ApiOperation({ summary: 'List merchant cash-out requests' })
+  @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'PAID', 'REJECTED', 'FAILED'] })
+  listCashouts(@Query('status') status?: string) {
+    return this.cashouts.adminList(status);
+  }
+
+  @Patch('cashouts/:id/approve')
+  @ApiOperation({ summary: 'Approve a cash-out — executes the payout' })
+  approveCashout(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.cashouts.approve(req.user.userId, id);
+  }
+
+  @Patch('cashouts/:id/reject')
+  @ApiOperation({ summary: 'Reject a cash-out — refunds the wallet' })
+  rejectCashout(@Req() req: AuthenticatedRequest, @Param('id') id: string, @Body('reason') reason?: string) {
+    return this.cashouts.reject(req.user.userId, id, reason);
   }
 
   // ── Country & Provider Management ────────────────────────────────────────

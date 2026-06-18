@@ -282,13 +282,14 @@ export class MerchantPaymentLinkService {
     const link = await this.prisma.merchantPaymentLink.findUnique({
       where: { slug },
       include: {
-        merchantProfile: { select: { businessName: true } },
+        merchantProfile: { select: { businessName: true, status: true } },
         baseCurrency: { select: { code: true, symbol: true, name: true } },
       },
     });
     if (!link) throw new NotFoundException('Payment link not found');
 
     const expired = link.expiresAt ? link.expiresAt.getTime() < Date.now() : false;
+    const merchantActive = link.merchantProfile.status === 'APPROVED';
     return {
       slug: link.slug,
       kind: link.kind,
@@ -304,7 +305,7 @@ export class MerchantPaymentLinkService {
       baseCurrency: link.baseCurrency,
       isActive: link.isActive,
       expired,
-      payable: link.isActive && !expired,
+      payable: link.isActive && !expired && merchantActive,
     };
   }
 
@@ -347,6 +348,9 @@ export class MerchantPaymentLinkService {
       include: { merchantProfile: true, baseCurrency: true },
     });
     if (!link) throw new NotFoundException('Payment link not found');
+    if (link.merchantProfile.status !== 'APPROVED') {
+      throw new BadRequestException('This business is not available right now');
+    }
     if (!link.isActive) throw new BadRequestException('This payment link is no longer active');
     if (link.expiresAt && link.expiresAt.getTime() < Date.now()) {
       throw new BadRequestException('This payment link has expired');
@@ -383,8 +387,9 @@ export class MerchantPaymentLinkService {
         reference,
         amount: targetAmount,
         currency: { connect: { id: settlementCurrency.id } },
-        // Events read better as "<Title> — <Registration>".
-        description: link.kind === 'EVENT' && link.title ? `${link.title} — ${link.reason}` : link.reason,
+        // Events read better as "<Title> - <Registration>" (ASCII hyphen: the
+        // payment provider rejects non-ASCII order info).
+        description: link.kind === 'EVENT' && link.title ? `${link.title} - ${link.reason}` : link.reason,
         country: payout.country.iso2,
         paymentMethod: null, // payer chooses when settling
         payoutMethod: payout.paymentMethod,

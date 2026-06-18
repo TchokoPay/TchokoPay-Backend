@@ -259,6 +259,8 @@ model MerchantProfile {
   invoices        PaymentInvoice[] @relation("MerchantInvoices")
   // Reusable payment-collection links owned by this business.
   paymentLinks    MerchantPaymentLink[] @relation("MerchantPaymentLinks")
+  // Cash-out (withdrawal) requests from the merchant wallet.
+  cashouts        MerchantCashout[] @relation("MerchantCashouts")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -300,6 +302,8 @@ model Currency {
   quotesAsTarget Quote[] @relation("TargetCurrency")
 
   paymentLinkBases MerchantPaymentLink[] @relation("PaymentLinkBaseCurrency")
+
+  cashouts MerchantCashout[] @relation("CashoutCurrency")
 
   countries Country[]
 
@@ -870,8 +874,11 @@ model Payout {
   invoiceId String         @unique
   invoice   PaymentInvoice @relation(fields: [invoiceId], references: [id])
 
-  amount   Decimal
+  amount   Decimal // net amount actually sent to the recipient (after any withdrawal fee)
   currency String
+
+  // Withdrawal fee withheld from a merchant auto-payout (0 for normal payouts).
+  fee Decimal @default(0)
 
   method PayoutMethod
 
@@ -1095,6 +1102,62 @@ model MerchantPaymentLink {
 
   @@index([merchantProfileId])
   @@index([slug])
+}
+
+/// Single-row platform configuration (id is always "singleton").
+model PlatformConfig {
+  id String @id @default("singleton")
+
+  // When false (default) ALL merchant money is held to the merchant wallet for
+  // admin-approved cash-out; when true merchant payments auto-route on receipt.
+  merchantAutoRoutePayout Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+}
+
+enum CashoutStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PAID
+  FAILED
+}
+
+/// A merchant's request to withdraw held wallet funds to their payout number.
+model MerchantCashout {
+  id String @id @default(uuid())
+
+  reference String @unique
+
+  merchantProfileId String
+  merchantProfile   MerchantProfile @relation("MerchantCashouts", fields: [merchantProfileId], references: [id], onDelete: Cascade)
+  userId            String
+
+  amount    Decimal // gross requested (debited from wallet)
+  fee       Decimal @default(0) // withdrawal fee (platform revenue)
+  netAmount Decimal // amount - fee, what is actually paid out
+
+  currencyId String
+  currency   Currency @relation("CashoutCurrency", fields: [currencyId], references: [id])
+
+  // Snapshot of the payout destination at request time.
+  payoutPhone        String?
+  payoutMethod       String?
+  payoutProviderCode String?
+  country            String?
+
+  status CashoutStatus @default(PENDING)
+
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+  externalRef     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([merchantProfileId])
+  @@index([status])
 }
 
 /**
