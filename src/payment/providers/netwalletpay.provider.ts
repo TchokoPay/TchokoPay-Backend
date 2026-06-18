@@ -140,7 +140,16 @@ export class NetwalletpayProvider implements PaymentProvider {
   }
 
   private normalizeOrderId(reference: string): string {
-    return (reference || '').trim().replace(/^(INV|REQ)-/i, '');
+    // Netwalletpay rejects order IDs containing separators with 4007
+    // ("order information is invalid"). A normal payin sends a clean numeric id
+    // ("INV-<ts>" → "<ts>"), but link/event refs are "REQ-<ts>-<hex>", whose
+    // inner "-" breaks the order. Strip the flow prefix AND any non-alphanumeric
+    // characters so the OrderID is always a clean token. Safe: the OrderID isn't
+    // used for callbacks/polling (those match on the provider TransactionId).
+    return (reference || '')
+      .trim()
+      .replace(/^(INV|REQ)-/i, '')
+      .replace(/[^a-zA-Z0-9]/g, '');
   }
 
   /**
