@@ -81,7 +81,7 @@ export class PayoutExecutorService {
     const gross = new Prisma.Decimal(quote.targetAmount);
     let fee = new Prisma.Decimal(0);
     if (isMerchantAutoPayout) {
-      const feePercent = await this.withdrawalFeePercent(quote.targetCurrency.code);
+      const feePercent = await this.withdrawalFeePercent(quote.baseCurrency.code, invoice.paymentMethod);
       if (feePercent > 0) {
         fee = new Prisma.Decimal(Math.round((Number(gross) * feePercent) / 100));
       }
@@ -462,14 +462,20 @@ export class PayoutExecutorService {
       return;
     }
 
-    const amount = new Prisma.Decimal(quote.targetAmount);
+    // The merchant withdrawal fee is taken at settlement — BEFORE the funds
+    // land in the wallet — so the available balance is always the net amount
+    // the merchant can actually withdraw (cash-out then carries no extra fee).
+    const gross = new Prisma.Decimal(quote.targetAmount);
+    const feePercent = await this.withdrawalFeePercent(quote.baseCurrency.code, invoice.paymentMethod);
+    const fee = feePercent > 0 ? new Prisma.Decimal(Math.round((Number(gross) * feePercent) / 100)) : new Prisma.Decimal(0);
+    const net = gross.sub(fee);
     const wallet = await this.getOrCreateWallet(invoice.recipientId, quote.targetCurrencyId);
 
     const updated = await this.prisma.wallet.update({
       where: { id: wallet.id },
       data: {
-        availableBalance: { increment: amount },
-        totalVolume: { increment: amount },
+        availableBalance: { increment: net },
+        totalVolume: { increment: gross },
       },
     });
 
@@ -477,7 +483,7 @@ export class PayoutExecutorService {
       data: {
         wallet: { connect: { id: wallet.id } },
         invoice: { connect: { id: invoice.id } },
-        amount,
+        amount: net,
         type: LedgerEntryType.CREDIT,
         balanceAfter: updated.availableBalance,
       },
@@ -489,7 +495,7 @@ export class PayoutExecutorService {
     });
 
     this.logger.log(
-      `🔒 Held ${amount.toString()} ${quote.targetCurrency.code} to wallet for invoice ${invoice.reference}`,
+      `🔒 Held ${net.toString()} ${quote.targetCurrency.code} (gross ${gross.toString()}, fee ${fee.toString()} @ ${feePercent}%) to wallet for invoice ${invoice.reference}`,
     );
 
     this.paymentEventService.emitPaymentComplete({
@@ -544,13 +550,22 @@ export class PayoutExecutorService {
     });
   }
 
-  /** Withdrawal fee % from an admin-configured WITHDRAWAL FeeConfig (0 if none). */
-  private async withdrawalFeePercent(currencyCode: string): Promise<number> {
+  /**
+   * Merchant fee % for a settlement, decided by HOW the payer paid — currency
+   * + method (WITHDRAWAL FeeConfig matched on baseCurrencyCode + paymentMethod).
+   * e.g. XAF via MoMo/Orange → 3.5%; anything else (incl. XAF via card) → the
+   * catch-all 10%. A `null` field on a rule means "any". Highest priority wins.
+   */
+  private async withdrawalFeePercent(payerCurrencyCode: string, payerMethod?: string | null): Promise<number> {
+    const method = (payerMethod || '').toUpperCase() || null;
     const cfg = await this.prisma.feeConfig.findFirst({
       where: {
         isActive: true,
         flow: 'WITHDRAWAL',
-        OR: [{ targetCurrencyCode: currencyCode }, { targetCurrencyCode: null }],
+        AND: [
+          { OR: [{ baseCurrencyCode: payerCurrencyCode }, { baseCurrencyCode: null }] },
+          { OR: [{ paymentMethod: method }, { paymentMethod: null }] },
+        ],
       },
       orderBy: { priority: 'desc' },
     });

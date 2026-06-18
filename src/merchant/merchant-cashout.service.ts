@@ -68,19 +68,6 @@ export class MerchantCashoutService {
     return payout;
   }
 
-  /** Withdrawal fee % from an admin-configured WITHDRAWAL FeeConfig (0 if none). */
-  private async withdrawalFeePercent(currencyCode: string): Promise<number> {
-    const cfg = await this.prisma.feeConfig.findFirst({
-      where: {
-        isActive: true,
-        flow: 'WITHDRAWAL',
-        OR: [{ targetCurrencyCode: currencyCode }, { targetCurrencyCode: null }],
-      },
-      orderBy: { priority: 'desc' },
-    });
-    return cfg ? Number(cfg.feePercent) : 0;
-  }
-
   private async creditWallet(userId: string, currencyId: string, amount: Prisma.Decimal, type: LedgerEntryType) {
     const wallet = await this.prisma.wallet.findFirst({ where: { userId, currencyId } });
     if (!wallet) return;
@@ -107,7 +94,9 @@ export class MerchantCashoutService {
     return {
       availableBalance: Number(wallet?.availableBalance ?? 0),
       currency: { code: currency.code, symbol: currency.symbol },
-      feePercent: await this.withdrawalFeePercent(currency.code),
+      // The merchant fee is taken at settlement (before funds reach the wallet),
+      // so the available balance is already net and cash-out carries no fee.
+      feePercent: 0,
       payoutTo: `${payout.provider.name} · ${payout.phone}`,
     };
   }
@@ -123,10 +112,10 @@ export class MerchantCashoutService {
     const available = Number(wallet?.availableBalance ?? 0);
     if (!wallet || available < amount) throw new BadRequestException('Insufficient available balance');
 
-    const feePercent = await this.withdrawalFeePercent(currency.code);
-    const fee = Math.round((amount * feePercent) / 100);
-    const netAmount = amount - fee;
-    if (netAmount <= 0) throw new BadRequestException('Amount is too small after the withdrawal fee');
+    // Fee is already applied at settlement, so the wallet balance is net —
+    // a cash-out withdraws the full requested amount with no further fee.
+    const fee = 0;
+    const netAmount = amount;
 
     const amountDec = new Prisma.Decimal(amount);
     // Reserve the funds immediately so they can't be double-withdrawn.
