@@ -9,7 +9,7 @@
  * Auth:     X-API-Key + X-API-Secret headers
  * Payin:    POST /v1/payments/payin/mobile-money
  * Payout:   POST /v1/payments/payout/mobile-money
- * Status:   GET  /payment/status/{reference}
+ * Status:   GET  /v1/payment/status/{reference}
  */
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -23,6 +23,7 @@ const ZIKOPAY_STATUSES: Record<string, 'SUCCESS' | 'FAILED' | 'PENDING'> = {
   failed:      'FAILED',
   cancelled:   'FAILED',
   expired:     'FAILED',
+  refunded:    'FAILED',
   pending:     'PENDING',
   processing:  'PENDING',
 };
@@ -40,7 +41,9 @@ export class ZikoPayProvider implements PaymentProvider {
     private configService: ConfigService,
     private prisma: PrismaService,
   ) {
-    this.baseUrl     = (configService.get<string>('ZIKOPAY_BASE_URL') ?? 'https://api.payment.zikopay.com').replace(/\/+$/, '');
+    // Normalise: strip trailing slashes AND a trailing /v1 so our paths (which
+    // include /v1) never double up regardless of how the env var is set.
+    this.baseUrl     = (configService.get<string>('ZIKOPAY_BASE_URL') ?? 'https://api.payment.zikopay.com').replace(/\/+$/, '').replace(/\/v1$/, '');
     this.apiKey      = configService.get<string>('ZIKOPAY_API_KEY')    ?? '';
     this.apiSecret   = configService.get<string>('ZIKOPAY_API_SECRET') ?? '';
     this.webhookBase = configService.get<string>('NETWALLETPAY_WEBHOOK_BASE_URL') ?? '';
@@ -132,7 +135,9 @@ export class ZikoPayProvider implements PaymentProvider {
     const data = await res.json() as Record<string, unknown>;
     this.logger.log(`   Response [${res.status}]: ${JSON.stringify(data)}`);
 
-    if (!res.ok || data.success === false) {
+    // ZikoPay signals failure two ways: status endpoint uses `success:false`,
+    // while payin/payout use `error:true`. Catch both (plus HTTP errors).
+    if (!res.ok || data.success === false || data.error === true) {
       throw new Error(String(data.message ?? `ZikoPay error ${res.status}`));
     }
 
@@ -161,7 +166,10 @@ export class ZikoPayProvider implements PaymentProvider {
         phoneNumber:  formattedPhone,
         operator:     operatorCode,
         return_url:   `${this.returnUrl}/dashboard`,
+        cancel_url:   `${this.returnUrl}/dashboard`,
         callback_url: `${this.webhookBase}/api/v1/webhooks/zikopay`,
+        // Required by the live API (docs incorrectly mark it optional).
+        payment_details: { reference, order_id: reference },
         customer: {
           name:  metadata?.payerName  as string || 'Customer',
           phone: formattedPhone,
@@ -170,7 +178,8 @@ export class ZikoPayProvider implements PaymentProvider {
         description: description?.trim() || `TchokoPay payment ${reference}`,
       });
 
-      const txRef = (response?.data as any)?.reference as string | undefined;
+      // Payin/payout return the reference at the TOP level; status wraps in data.
+      const txRef = (response?.reference ?? (response?.data as any)?.reference) as string | undefined;
       this.logger.log(`✅ ZikoPay PAYIN accepted — ref: ${txRef}`);
 
       return {
@@ -208,7 +217,11 @@ export class ZikoPayProvider implements PaymentProvider {
         currency,
         phoneNumber:  formattedPhone,
         operator:     operatorCode,
+        return_url:   `${this.returnUrl}/dashboard`,
+        cancel_url:   `${this.returnUrl}/dashboard`,
         callback_url: `${this.webhookBase}/api/v1/webhooks/zikopay`,
+        // Required by the live API (docs incorrectly mark it optional).
+        payout_details: { reference, order_id: reference },
         customer: {
           name:  metadata?.recipientName as string || 'Recipient',
           phone: formattedPhone,
@@ -217,7 +230,8 @@ export class ZikoPayProvider implements PaymentProvider {
         description: description?.trim() || `TchokoPay payout ${reference}`,
       });
 
-      const txRef = (response?.data as any)?.reference as string | undefined;
+      // Payin/payout return the reference at the TOP level; status wraps in data.
+      const txRef = (response?.reference ?? (response?.data as any)?.reference) as string | undefined;
       this.logger.log(`✅ ZikoPay PAYOUT accepted — ref: ${txRef}`);
 
       return { status: 'SUCCESS', transactionId: txRef, provider: providerName };
@@ -232,7 +246,7 @@ export class ZikoPayProvider implements PaymentProvider {
     raw: unknown;
   }> {
     try {
-      const response = await this.request<any>('GET', `/payment/status/${transactionId}`);
+      const response = await this.request<any>('GET', `/v1/payment/status/${transactionId}`);
       const apiStatus = String((response?.data as any)?.status ?? '').toLowerCase();
       const status = ZIKOPAY_STATUSES[apiStatus] ?? 'PENDING';
       return { status, raw: response };

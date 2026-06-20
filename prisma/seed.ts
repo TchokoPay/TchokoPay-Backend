@@ -85,18 +85,14 @@ const zikoPayProviders = [
   { providerCode: 'ziko_moov_ci',   name: 'Moov Money',     country: 'CI', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'moov_ci'   },
   { providerCode: 'ziko_wave_ci',   name: 'Wave',           country: 'CI', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'wave_ci'   },
   // SN — ZikoPay exclusive
-  { providerCode: 'ziko_orange_sn', name: 'Orange Money',   country: 'SN', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'orange_sn' },
-  { providerCode: 'ziko_free_sn',   name: 'Free Money',     country: 'SN', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'free_sn'   },
-  { providerCode: 'ziko_wave_sn',   name: 'Wave',           country: 'SN', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'wave_sn'   },
+  { providerCode: 'ziko_orange_sn',     name: 'Orange Money', country: 'SN', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'orange_sn'     },
+  { providerCode: 'ziko_free_money_sn', name: 'Free Money',   country: 'SN', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'free_money_sn' },
+  { providerCode: 'ziko_expresso_sn',   name: 'Expresso',     country: 'SN', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'expresso_sn'   },
   // BJ — ZikoPay exclusive
   { providerCode: 'ziko_mtn_bj',    name: 'MTN MoMo',      country: 'BJ', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'mtn_bj'    },
   { providerCode: 'ziko_moov_bj',   name: 'Moov Money',     country: 'BJ', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'moov_bj'   },
   // TG — ZikoPay exclusive
-  { providerCode: 'ziko_tmoney_tg', name: 'T-Money',        country: 'TG', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'tmoney_tg' },
-  { providerCode: 'ziko_moov_tg',   name: 'Moov Money',     country: 'TG', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'moov_tg'   },
-  // GH — fallback to ZikoPay (Netwalletpay only had netwallet_gh)
-  { providerCode: 'ziko_mtn_gh',    name: 'MTN MoMo',      country: 'GH', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'mtn_gh'    },
-  { providerCode: 'ziko_vodafone_gh',name: 'Vodafone Cash', country: 'GH', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 'vodafone_gh'},
+  { providerCode: 'ziko_t_money_tg', name: 'T-Money',       country: 'TG', method: 'MOBILE_MONEY', requiresType: false, operatorCode: 't_money_tg' },
 ];
 
 async function main() {

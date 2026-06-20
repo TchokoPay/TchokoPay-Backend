@@ -51,6 +51,8 @@ export class PayoutExecutorService {
             confirmEmailMessage: true,
             confirmEmailAttachmentUrl: true,
             confirmEmailAttachmentName: true,
+            baseAmount: true,
+            baseCurrency: { select: { code: true } },
             merchantProfile: { select: { businessName: true } },
           },
         },
@@ -608,8 +610,10 @@ export class PayoutExecutorService {
         payerName: invoice.payerName,
         eventTitle: link.title || link.reason || 'the event',
         businessName: link.merchantProfile?.businessName ?? 'TchokoPay',
-        amount: Number(quote.baseAmount),
-        currency: quote.baseCurrency.code,
+        // Show the event's advertised price (e.g. $21), not the payer's
+        // converted/charged amount in their local currency.
+        amount: Number(link.baseAmount ?? quote.baseAmount),
+        currency: link.baseCurrency?.code ?? quote.baseCurrency.code,
         reference: invoice.reference,
         coverImageUrl: link.coverImageUrl,
         logoUrl: link.logoUrl,
