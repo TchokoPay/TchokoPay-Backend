@@ -61,19 +61,26 @@ export class QuoteService {
     // ============================
     let pricing;
 
-    try {
-      pricing = await this.pricingService.getPricing({
-        baseCurrency: baseCurrency.code,
-        targetCurrency: targetCurrency.code,
-        paymentMethod: dto.paymentMethod,
-        payoutMethod: dto.payoutMethod,
-        flow: dto.flow,
-      });
-    } catch (err) {
-      console.log(
-        `⚠️ No pricing match found for ${baseCurrency.code}→${targetCurrency.code} | ${dto.paymentMethod}→${dto.payoutMethod} → using fallback`,
-      );
-      pricing = { feePercent: 1.5, spreadPercent: 1.0 };
+    if (dto.cleanRate) {
+      // Merchant settlement leg: no platform fee/spread (the payer bears those).
+      pricing = { feePercent: 0, spreadPercent: 0 };
+    } else {
+      try {
+        pricing = await this.pricingService.getPricing({
+          // Events/links price by the merchant's base currency (e.g. USD),
+          // not the payer's FX currency.
+          baseCurrency: dto.pricingBaseCurrency || baseCurrency.code,
+          targetCurrency: targetCurrency.code,
+          paymentMethod: dto.paymentMethod,
+          payoutMethod: dto.payoutMethod,
+          flow: dto.flow,
+        });
+      } catch (err) {
+        console.log(
+          `⚠️ No pricing match found for ${dto.pricingBaseCurrency || baseCurrency.code}→${targetCurrency.code} | ${dto.paymentMethod}→${dto.payoutMethod} → using fallback`,
+        );
+        pricing = { feePercent: 1.5, spreadPercent: 1.0 };
+      }
     }
 
     const feePercent = Number(pricing.feePercent ?? 1.5);
@@ -278,19 +285,23 @@ export class QuoteService {
 
     let pricing;
 
-    try {
-      pricing = await this.pricingService.getPricing({
-        baseCurrency: baseCurrency.code,
-        targetCurrency: targetCurrency.code,
-        paymentMethod: dto.paymentMethod,
-        payoutMethod: dto.payoutMethod,
-        flow: dto.flow,
-      });
-    } catch (err) {
+    if (dto.cleanRate) {
+      pricing = { feePercent: 0, spreadPercent: 0 };
+    } else {
+      try {
+        pricing = await this.pricingService.getPricing({
+          baseCurrency: dto.pricingBaseCurrency || baseCurrency.code,
+          targetCurrency: targetCurrency.code,
+          paymentMethod: dto.paymentMethod,
+          payoutMethod: dto.payoutMethod,
+          flow: dto.flow,
+        });
+      } catch (err) {
       console.log(
         `âš ï¸ No pricing match found for ${baseCurrency.code}â†’${targetCurrency.code} | ${dto.paymentMethod}â†’${dto.payoutMethod} â†’ using fallback`,
       );
-      pricing = { feePercent: 1.5, spreadPercent: 1.0 };
+        pricing = { feePercent: 1.5, spreadPercent: 1.0 };
+      }
     }
 
     const feePercent = Number(pricing.feePercent ?? 1.5);

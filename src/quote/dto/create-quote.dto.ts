@@ -106,4 +106,20 @@ export class CreateQuoteDto {
   @IsOptional()
   @IsEnum(FlowEnum)
   flow?: FlowEnum;
+
+  // ============================
+  // PRICING OVERRIDES (merchant events/links)
+  // ============================
+  /**
+   * Look up the fee/spread by THIS currency instead of `baseCurrency`. Used for
+   * merchant events/links so pricing is keyed by the merchant's base currency
+   * (e.g. USD) while the FX conversion still uses the payer's actual currency.
+   */
+  @IsOptional()
+  @IsString()
+  pricingBaseCurrency?: string;
+
+  /** Skip platform fee/spread entirely (0/0). Used to settle merchants at a clean rate. */
+  @IsOptional()
+  cleanRate?: boolean;
 }

@@ -35,6 +35,7 @@ export class PayoutExecutorService {
     const invoice = await this.prisma.paymentInvoice.findUnique({
       where: { id: invoiceId },
       include: {
+        currency: true,
         quote: {
           include: { baseCurrency: true, targetCurrency: true },
         },
@@ -92,9 +93,11 @@ export class PayoutExecutorService {
 
     const { quote } = invoice;
 
-    // Merchant auto-payouts carry the same withdrawal fee as a manual cash-out:
-    // the merchant receives (settled amount − fee) and the platform keeps the fee.
-    const gross = new Prisma.Decimal(quote.targetAmount);
+    // Merchants settle in THEIR settlement currency (the clean USD→XAF locked at
+    // pay-time = invoice.amount), decoupled from the payer-leg quote (which, for
+    // USD events, targets USD). Non-merchant payouts keep the quote target.
+    const settlementCurrencyCode = isMerchantAutoPayout ? invoice.currency.code : quote.targetCurrency.code;
+    const gross = new Prisma.Decimal(isMerchantAutoPayout ? invoice.amount : quote.targetAmount);
     let fee = new Prisma.Decimal(0);
     if (isMerchantAutoPayout) {
       const feePercent = await this.withdrawalFeePercent(quote.baseCurrency.code, invoice.paymentMethod);
@@ -115,7 +118,7 @@ export class PayoutExecutorService {
         invoice: { connect: { id: invoiceId } },
         amount: payoutAmount,
         fee,
-        currency: quote.targetCurrency.code,
+        currency: settlementCurrencyCode,
         method: this.mapPayoutMethod(invoice.payoutMethod),
         status: TransactionStatus.PROCESSING,
       },
@@ -138,7 +141,7 @@ export class PayoutExecutorService {
 
       const response = await payoutProvider.payout({
         amount: Number(payoutAmount),
-        currency: quote.targetCurrency.code,
+        currency: settlementCurrencyCode,
         phone: invoice.recipientPhone ?? undefined,
         reference: invoice.reference,
         description: invoice.description || undefined,
@@ -481,14 +484,15 @@ export class PayoutExecutorService {
       return;
     }
 
-    // The merchant withdrawal fee is taken at settlement — BEFORE the funds
-    // land in the wallet — so the available balance is always the net amount
-    // the merchant can actually withdraw (cash-out then carries no extra fee).
-    const gross = new Prisma.Decimal(quote.targetAmount);
+    // Settle the merchant in THEIR settlement currency = invoice.amount (the
+    // clean USD→XAF locked at pay-time), not the payer-leg quote target. The
+    // withdrawal fee is taken here — BEFORE the funds land in the wallet — so
+    // the balance is always the net withdrawable amount (cash-out is fee-free).
+    const gross = new Prisma.Decimal(invoice.amount);
     const feePercent = await this.withdrawalFeePercent(quote.baseCurrency.code, invoice.paymentMethod);
     const fee = feePercent > 0 ? new Prisma.Decimal(Math.round((Number(gross) * feePercent) / 100)) : new Prisma.Decimal(0);
     const net = gross.sub(fee);
-    const wallet = await this.getOrCreateWallet(invoice.recipientId, quote.targetCurrencyId);
+    const wallet = await this.getOrCreateWallet(invoice.recipientId, invoice.currencyId);
 
     const updated = await this.prisma.wallet.update({
       where: { id: wallet.id },
@@ -514,7 +518,7 @@ export class PayoutExecutorService {
     });
 
     this.logger.log(
-      `🔒 Held ${net.toString()} ${quote.targetCurrency.code} (gross ${gross.toString()}, fee ${fee.toString()} @ ${feePercent}%) to wallet for invoice ${invoice.reference}`,
+      `🔒 Held ${net.toString()} ${invoice.currency.code} (gross ${gross.toString()}, fee ${fee.toString()} @ ${feePercent}%) to wallet for invoice ${invoice.reference}`,
     );
 
     this.paymentEventService.emitPaymentComplete({

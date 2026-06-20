@@ -421,6 +421,10 @@ export class MerchantPaymentLinkService {
       paymentMethod: PaymentMethodEnum.MOMO, // placeholder — only the rate is used
       payoutMethod: PaymentMethodEnum.MOMO,
       flow: FlowEnum.REQUEST,
+      // Only USD-priced events (for now) settle the merchant at the clean rate —
+      // their platform fee/spread are charged to the PAYER at pay-time instead
+      // of deducted from the merchant. All other base currencies are unchanged.
+      cleanRate: link.baseCurrency.code === 'USD',
     });
     const targetAmount = new Prisma.Decimal(conversion.targetAmount);
 
