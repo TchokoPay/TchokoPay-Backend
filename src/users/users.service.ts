@@ -411,8 +411,12 @@ export class UsersService {
     const latestAttempt = invoice.attempts[0] ?? null;
     const payerAmount = invoice.quote?.baseAmount ?? latestAttempt?.amount ?? null;
     const payerCurrency = invoice.quote?.baseCurrency?.code ?? latestAttempt?.currency?.code ?? null;
-    const recipientAmount = invoice.quote?.targetAmount ?? invoice.amount;
-    const recipientCurrency = invoice.quote?.targetCurrency?.code ?? invoice.currency.code;
+    // The recipient ALWAYS sees the settlement amount/currency that actually
+    // credits their wallet (invoice.amount in invoice.currency). For USD-priced
+    // events the payer-leg quote targets USD, so quote.targetAmount would show
+    // USD here and diverge from the wallet — invoice.amount keeps it unified.
+    const recipientAmount = invoice.amount;
+    const recipientCurrency = invoice.currency.code;
 
     const counterparty =
       role === 'PAYER'

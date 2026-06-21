@@ -260,7 +260,10 @@ export class MerchantService {
     for (const inv of invoices) {
       const day = inv.createdAt.toISOString().slice(0, 10);
       const row = txMap.get(day) ?? { success: 0, failed: 0, total: 0, volume: 0, fees: 0 };
-      const amount = Number(inv.quote?.baseAmount ?? inv.amount);
+      // Use the settlement amount (merchant's currency) so volume is consistent
+      // with the wallet/revenue. quote.baseAmount is the payer's currency and
+      // would mix currencies (e.g. USD-priced events paid in KES/XAF).
+      const amount = Number(inv.amount);
       const fee = Number(inv.quote?.fee ?? 0);
 
       row.total++;
