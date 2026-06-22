@@ -106,6 +106,21 @@ export class AdminController {
 
   // ── Invoices / Transactions ───────────────────────────────────────────────
 
+  @Get('payment-issues')
+  @ApiOperation({ summary: 'Failed + stalled payments with full diagnostic detail (failure reason + raw provider response)' })
+  @ApiQuery({ name: 'page',  required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiQuery({ name: 'type',  required: false, description: 'FAILED | STALLED | ALL' })
+  @ApiQuery({ name: 'search', required: false })
+  getPaymentIssues(
+    @Query('page',  new DefaultValuePipe(1),  ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(25), ParseIntPipe) limit: number,
+    @Query('type')   type?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.admin.getPaymentIssues({ page, limit: Math.min(limit, 100), type, search });
+  }
+
   @Get('invoices')
   @ApiOperation({ summary: 'List all payment invoices' })
   @ApiQuery({ name: 'page',    required: false })
@@ -350,6 +365,33 @@ export class AdminController {
   @ApiOperation({ summary: 'Enable or disable a single payment provider' })
   toggleProvider(@Req() req: AuthenticatedRequest, @Param('code') code: string) {
     return this.admin.toggleProvider(req.user.userId, code, req.ip);
+  }
+
+  @Post('providers/import')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Add (or re-activate) a provider into our DB — e.g. pull a missing Netwalletpay provider from the live lookup' })
+  importProvider(
+    @Req() req: AuthenticatedRequest,
+    @Body('country')      country: string,
+    @Body('method')       method: string,
+    @Body('providerCode') providerCode: string,
+    @Body('name')         name: string,
+    @Body('aggregator')   aggregator?: string,
+  ) {
+    if (!country || !method || !providerCode || !name) {
+      throw new BadRequestException('country, method, providerCode and name are required');
+    }
+    return this.admin.importProvider(
+      req.user.userId,
+      { country, method: method.toUpperCase(), providerCode: providerCode.trim(), name: name.trim(), aggregator },
+      req.ip,
+    );
+  }
+
+  @Delete('providers/:code')
+  @ApiOperation({ summary: 'Delete a provider (deactivates instead if still referenced)' })
+  deleteProvider(@Req() req: AuthenticatedRequest, @Param('code') code: string) {
+    return this.admin.deleteProvider(req.user.userId, code, req.ip);
   }
 
   @Post('providers/test')

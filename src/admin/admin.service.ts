@@ -269,6 +269,135 @@ export class AdminService {
 
   // ── Invoices ──────────────────────────────────────────────────────────────
 
+  /**
+   * Failed + stalled payments with full diagnostic detail for debugging.
+   * FAILED  = invoice.status FAILED.
+   * STALLED = invoice.status PROCESSING and untouched for >5 min (stuck in flight).
+   * Each row carries every pay-in attempt with its failureReason + raw
+   * providerResponse (the "why") and exact timestamps.
+   */
+  async getPaymentIssues(params: {
+    page: number;
+    limit: number;
+    type?: string;
+    search?: string;
+  }) {
+    const { page, limit, search } = params;
+    const type = (params.type || 'ALL').toUpperCase();
+    const skip = (page - 1) * limit;
+    const stalledCutoff = new Date(Date.now() - 5 * 60_000);
+
+    const statusOr: Record<string, unknown>[] = [];
+    if (type === 'FAILED' || type === 'ALL') statusOr.push({ status: 'FAILED' });
+    if (type === 'STALLED' || type === 'ALL') {
+      statusOr.push({ status: 'PROCESSING', updatedAt: { lt: stalledCutoff } });
+    }
+
+    const where: Record<string, unknown> = { OR: statusOr };
+    if (search) {
+      where.AND = [
+        {
+          OR: [
+            { reference: { contains: search, mode: 'insensitive' } },
+            { description: { contains: search, mode: 'insensitive' } },
+            { payerEmail: { contains: search, mode: 'insensitive' } },
+          ],
+        },
+      ];
+    }
+
+    const [invoices, total] = await Promise.all([
+      this.prisma.paymentInvoice.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { updatedAt: 'desc' },
+        include: {
+          currency: { select: { code: true, symbol: true } },
+          createdBy: { select: { firstName: true, lastName: true } },
+          merchantPaymentLink: {
+            select: { kind: true, title: true, merchantProfile: { select: { businessName: true } } },
+          },
+          attempts: {
+            orderBy: { createdAt: 'desc' },
+            include: { currency: { select: { code: true } } },
+          },
+          payout: {
+            select: {
+              status: true,
+              amount: true,
+              currency: true,
+              attempts: {
+                orderBy: { createdAt: 'desc' },
+                select: { status: true, provider: true, externalRef: true, createdAt: true },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.paymentInvoice.count({ where }),
+    ]);
+
+    return {
+      data: invoices.map((inv) => {
+        const isFailed = inv.status === 'FAILED';
+        const latest = inv.attempts[0] ?? null;
+        const reason = isFailed
+          ? latest?.failureReason || 'Failed — no reason recorded by the provider'
+          : inv.attempts.length === 0
+            ? 'Stalled — payer never started the payment'
+            : 'Stalled — pay-in attempted but never confirmed (lost webhook/poll)';
+        return {
+          id: inv.id,
+          reference: inv.reference,
+          type: isFailed ? 'FAILED' : 'STALLED',
+          status: inv.status,
+          flow: inv.flow,
+          kind: inv.merchantPaymentLink?.kind ?? null,
+          title: inv.merchantPaymentLink?.title ?? inv.description ?? null,
+          businessName: inv.merchantPaymentLink?.merchantProfile?.businessName ?? null,
+          amount: Number(inv.amount),
+          currency: inv.currency.code,
+          payerName:
+            inv.payerName ||
+            (inv.createdBy ? `${inv.createdBy.firstName ?? ''} ${inv.createdBy.lastName ?? ''}`.trim() : null) ||
+            null,
+          payerEmail: inv.payerEmail ?? null,
+          method: inv.paymentMethod,
+          payoutMethod: inv.payoutMethod,
+          country: inv.country,
+          reason,
+          createdAt: inv.createdAt,
+          updatedAt: inv.updatedAt,
+          expiresAt: inv.expiresAt,
+          attempts: inv.attempts.map((a) => ({
+            id: a.id,
+            status: a.status,
+            provider: a.provider,
+            method: a.method,
+            externalRef: a.externalRef,
+            amount: Number(a.amount),
+            currency: a.currency.code,
+            failureReason: a.failureReason,
+            providerResponse: a.providerResponse,
+            metadata: a.metadata,
+            createdAt: a.createdAt,
+            updatedAt: a.updatedAt,
+          })),
+          payout: inv.payout
+            ? {
+                status: inv.payout.status,
+                amount: Number(inv.payout.amount),
+                currency: inv.payout.currency,
+                attempts: inv.payout.attempts,
+              }
+            : null,
+        };
+      }),
+      meta: { total, page, limit, pages: Math.ceil(total / limit) },
+    };
+  }
+
   async listInvoices(params: {
     page: number;
     limit: number;
@@ -776,33 +905,139 @@ export class AdminService {
     });
     if (!profile) throw new NotFoundException('Merchant not found');
 
-    const [linkCount, eventCount, paid, cashoutCount, wallets] = await Promise.all([
-      this.prisma.merchantPaymentLink.count({ where: { merchantProfileId: merchantId, kind: 'LINK' } }),
-      this.prisma.merchantPaymentLink.count({ where: { merchantProfileId: merchantId, kind: 'EVENT' } }),
-      this.prisma.paymentInvoice.aggregate({
-        where: { merchantProfileId: merchantId, status: 'SUCCESS' },
-        _sum: { amount: true },
-        _count: { _all: true },
-      }),
-      this.prisma.merchantCashout.count({ where: { merchantProfileId: merchantId } }),
-      this.prisma.wallet.findMany({
-        where: { userId: profile.userId },
-        select: { availableBalance: true, currency: { select: { code: true } } },
-      }),
-    ]);
+    // Merchant-fee rules loaded once, matched in memory (same logic as the
+    // payout executor: highest priority rule whose currency/method matches).
+    const feeConfigs = await this.prisma.feeConfig.findMany({
+      where: { isActive: true, flow: 'WITHDRAWAL' },
+      orderBy: { priority: 'desc' },
+    });
+    const feePercentFor = (payerCurrency: string | null, method: string | null): number => {
+      const m = (method || '').toUpperCase() || null;
+      const cfg = feeConfigs.find(
+        (c) =>
+          (c.baseCurrencyCode === payerCurrency || c.baseCurrencyCode === null) &&
+          (c.paymentMethod === m || c.paymentMethod === null),
+      );
+      return cfg ? Number(cfg.feePercent) : 0;
+    };
+
+    const [linkCount, eventCount, cashoutCount, wallets, statusGroups, successLite, recent] =
+      await Promise.all([
+        this.prisma.merchantPaymentLink.count({ where: { merchantProfileId: merchantId, kind: 'LINK' } }),
+        this.prisma.merchantPaymentLink.count({ where: { merchantProfileId: merchantId, kind: 'EVENT' } }),
+        this.prisma.merchantCashout.count({ where: { merchantProfileId: merchantId } }),
+        this.prisma.wallet.findMany({
+          where: { userId: profile.userId },
+          select: { availableBalance: true, currency: { select: { code: true } } },
+        }),
+        this.prisma.paymentInvoice.groupBy({
+          by: ['status'],
+          where: { merchantProfileId: merchantId },
+          _count: { _all: true },
+        }),
+        // Lightweight all-time SUCCESS set for accurate volume + earnings.
+        this.prisma.paymentInvoice.findMany({
+          where: { merchantProfileId: merchantId, status: 'SUCCESS' },
+          select: {
+            amount: true,
+            paymentMethod: true,
+            createdById: true,
+            currency: { select: { code: true } },
+            quote: { select: { fee: true, baseCurrency: { select: { code: true } } } },
+          },
+        }),
+        // Recent transactions (full detail) for the list.
+        this.prisma.paymentInvoice.findMany({
+          where: { merchantProfileId: merchantId },
+          orderBy: { createdAt: 'desc' },
+          take: 100,
+          include: {
+            currency: { select: { code: true, symbol: true } },
+            quote: { include: { baseCurrency: true, targetCurrency: true } },
+            createdBy: { select: { firstName: true, lastName: true } },
+            payout: { select: { status: true, amount: true, currency: true, fee: true } },
+            attempts: { orderBy: { createdAt: 'desc' }, take: 1, select: { provider: true, status: true } },
+            merchantPaymentLink: { select: { kind: true, title: true } },
+          },
+        }),
+      ]);
+
+    // ── All-time analysis (settlement currency = the merchant's wallet currency) ──
+    const settlementCurrency =
+      wallets[0]?.currency.code ?? recent[0]?.currency.code ?? 'XAF';
+    let volume = 0;
+    let earnings = 0;          // platform's merchant-fee take (settlement currency)
+    let platformFees = 0;      // payer-side platform fee (quote.fee, payer currency)
+    const payers = new Set<string>();
+    for (const inv of successLite) {
+      const s = Number(inv.amount);
+      volume += s;
+      earnings += Math.round((s * feePercentFor(inv.quote?.baseCurrency?.code ?? null, inv.paymentMethod)) / 100);
+      if (inv.quote?.fee != null) platformFees += Number(inv.quote.fee);
+      if (inv.createdById) payers.add(inv.createdById);
+    }
+    const counts = Object.fromEntries(statusGroups.map((g) => [g.status, g._count._all]));
+
+    // ── Recent transactions with per-tx profit ──
+    const transactions = recent.map((inv) => {
+      const settlement = Number(inv.amount);
+      const payerCurrency = inv.quote?.baseCurrency?.code ?? null;
+      const feePercent = inv.status === 'SUCCESS' ? feePercentFor(payerCurrency, inv.paymentMethod) : 0;
+      const merchantFee = Math.round((settlement * feePercent) / 100);
+      const platformFee = inv.quote?.fee != null ? Number(inv.quote.fee) : 0;
+      const payer =
+        inv.payerName ||
+        (inv.createdBy ? `${inv.createdBy.firstName ?? ''} ${inv.createdBy.lastName ?? ''}`.trim() : '') ||
+        null;
+      return {
+        id: inv.id,
+        reference: inv.reference,
+        status: inv.status,
+        kind: inv.merchantPaymentLink?.kind ?? null,
+        title: inv.merchantPaymentLink?.title ?? inv.description ?? null,
+        createdAt: inv.createdAt,
+        payerName: payer,
+        payerEmail: inv.payerEmail ?? null,
+        method: inv.paymentMethod,
+        provider: inv.attempts[0]?.provider ?? null,
+        payinStatus: inv.attempts[0]?.status ?? null,
+        payoutStatus: inv.payout?.status ?? null,
+        // what the merchant receives (gross settlement) + currency
+        settlementAmount: settlement,
+        settlementCurrency: inv.currency.code,
+        // what the payer actually paid + currency
+        payerAmount: inv.quote ? Number(inv.quote.baseAmount) : null,
+        payerCurrency,
+        // profit breakdown
+        merchantFeePercent: feePercent,
+        merchantFee,
+        netToMerchant: settlement - merchantFee,
+        platformFee,
+        platformFeeCurrency: payerCurrency,
+      };
+    });
 
     return {
       profile,
-      stats: {
+      balance: wallets
+        .map((w) => ({ availableBalance: Number(w.availableBalance), currency: w.currency.code }))
+        .filter((w) => w.availableBalance > 0),
+      analysis: {
+        settlementCurrency,
+        volume,
+        earnings,            // platform earnings from merchant fees (settlement currency)
+        platformFees,        // payer-side platform fees collected (payer currency, may be mixed)
+        paymentsCount: counts['SUCCESS'] ?? 0,
+        successCount: counts['SUCCESS'] ?? 0,
+        failedCount: counts['FAILED'] ?? 0,
+        pendingCount: (counts['PENDING'] ?? 0) + (counts['PROCESSING'] ?? 0),
+        totalCount: statusGroups.reduce((s, g) => s + g._count._all, 0),
+        uniquePayers: payers.size,
         links: linkCount,
         events: eventCount,
-        paymentsCount: paid._count._all,
-        collected: Number(paid._sum.amount ?? 0),
         cashouts: cashoutCount,
-        wallets: wallets
-          .map((w) => ({ availableBalance: Number(w.availableBalance), currency: w.currency.code }))
-          .filter((w) => w.availableBalance > 0),
       },
+      transactions,
     };
   }
 
@@ -1143,6 +1378,66 @@ export class AdminService {
     });
     await this.log(adminId, provider.isActive ? 'PROVIDER_DISABLED' : 'PROVIDER_ENABLED', 'SYSTEM', providerCode, { name: provider.name, country: provider.country.iso2 }, ip);
     return updated;
+  }
+
+  /** Add (or re-activate) a single provider — used to pull a provider that
+   *  exists upstream but is missing from our DB (e.g. netwallet_gh) straight
+   *  from the live lookup, with no hardcoding. */
+  async importProvider(
+    adminId: string,
+    dto: { country: string; method: string; providerCode: string; name: string; aggregator?: string },
+    ip?: string,
+  ) {
+    const iso2 = dto.country.toUpperCase();
+    if (!dto.providerCode?.trim() || !dto.name?.trim()) {
+      throw new BadRequestException('providerCode and name are required');
+    }
+    const countryRec = await this.prisma.country.findUnique({ where: { iso2 } });
+    if (!countryRec) throw new NotFoundException(`Country ${iso2} not found`);
+    const methodRec = await this.prisma.paymentMethodRef.findUnique({ where: { code: dto.method } });
+    if (!methodRec) throw new NotFoundException(`Method ${dto.method} not found`);
+    const aggregatorCode = dto.aggregator ?? 'netwalletpay';
+    const aggregator = await this.prisma.paymentAggregator.findUnique({ where: { code: aggregatorCode } });
+    if (!aggregator) throw new NotFoundException(`Aggregator ${aggregatorCode} not found`);
+
+    const provider = await this.prisma.paymentProvider.upsert({
+      where: { providerCode: dto.providerCode },
+      create: {
+        providerCode: dto.providerCode,
+        name: dto.name,
+        aggregatorId: aggregator.id,
+        countryId: countryRec.id,
+        methodId: methodRec.id,
+        requiresType: false,
+        isActive: true,
+      },
+      update: { name: dto.name, isActive: true },
+      include: { country: true, method: { select: { code: true, name: true } } },
+    });
+
+    // A provider is useless while its country is disabled — bring it online.
+    if (!countryRec.isActive) {
+      await this.prisma.country.update({ where: { iso2 }, data: { isActive: true } });
+    }
+
+    await this.log(adminId, 'PROVIDER_IMPORTED', 'SYSTEM', dto.providerCode, { name: dto.name, country: iso2, aggregator: aggregatorCode }, ip);
+    return provider;
+  }
+
+  /** Remove a provider that no longer exists upstream (e.g. a stale code).
+   *  Falls back to deactivation if saved payout settings still reference it. */
+  async deleteProvider(adminId: string, providerCode: string, ip?: string) {
+    const provider = await this.prisma.paymentProvider.findUnique({ where: { providerCode } });
+    if (!provider) throw new NotFoundException('Provider not found');
+    const refs = await this.prisma.userPaymentPhoneSettings.count({ where: { providerId: provider.id } });
+    if (refs > 0) {
+      await this.prisma.paymentProvider.update({ where: { providerCode }, data: { isActive: false } });
+      await this.log(adminId, 'PROVIDER_DISABLED', 'SYSTEM', providerCode, { reason: 'referenced; deactivated instead of deleted' }, ip);
+      return { deleted: false, deactivated: true };
+    }
+    await this.prisma.paymentProvider.delete({ where: { providerCode } });
+    await this.log(adminId, 'PROVIDER_DELETED', 'SYSTEM', providerCode, { name: provider.name }, ip);
+    return { deleted: true, deactivated: false };
   }
 
   /** Calls Netwalletpay live API to check what providers they have for a given country/method.

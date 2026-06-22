@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { TransactionStatus } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { NetwalletpayProvider } from '../providers/netwalletpay.provider.js';
+import { ZikoPayProvider } from '../providers/zikopay.provider.js';
 import { BlinkApiService } from '../providers/services/blink-api.service.js';
 import { PayoutExecutorService } from './payout-executor.service.js';
 import { PaymentEventService } from './payment-event.service.js';
@@ -42,16 +43,29 @@ export type PollJob = PayinPollJob;
  * Default cadence: 24 polls × 5 s = 2 minutes per job.
  */
 @Injectable()
-export class PaymentPollingService {
+export class PaymentPollingService implements OnApplicationBootstrap {
   private readonly logger = new Logger(PaymentPollingService.name);
+  private reconcileRunning = false;
 
   constructor(
     private prisma: PrismaService,
     private netwalletpay: NetwalletpayProvider,
+    private zikopay: ZikoPayProvider,
     private blinkApi: BlinkApiService,
     private payoutExecutor: PayoutExecutorService,
     private paymentEventService: PaymentEventService,
   ) {}
+
+  /**
+   * Self-healing reconciliation. The in-memory polls above do not survive a
+   * restart, so any payin left PROCESSING (lost poll / missed webhook) would sit
+   * stuck forever. This sweep re-resolves them against the provider — runs once
+   * shortly after boot (to catch restart orphans) then on a fixed interval.
+   */
+  onApplicationBootstrap(): void {
+    setTimeout(() => void this.safeReconcile(), 30_000);
+    setInterval(() => void this.safeReconcile(), 2 * 60_000);
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // PUBLIC — PAYIN POLLING
@@ -255,6 +269,174 @@ export class PaymentPollingService {
         timestamp: new Date(),
         userId: attempt.invoice.createdById ?? undefined,
       });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // RECONCILIATION — self-healing sweep for stuck PROCESSING payins
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private async safeReconcile(): Promise<void> {
+    if (this.reconcileRunning) return; // never overlap sweeps
+    this.reconcileRunning = true;
+    try {
+      await this.reconcileStalePayins();
+      await this.purgeAbandonedRegistrations();
+    } catch (err) {
+      this.logger.error('Reconcile sweep failed:', err);
+    } finally {
+      this.reconcileRunning = false;
+    }
+  }
+
+  /**
+   * Hard-delete abandoned registration shells: merchant link/event invoices that
+   * were created (with a quote) but NEVER attempted — no pay-in, no payout, no
+   * ledger, no money — and have been sitting PENDING for over 6 hours. Removes
+   * the invoice, its now-orphan quote, and the linked payment request.
+   */
+  async purgeAbandonedRegistrations(): Promise<void> {
+    const cutoff = new Date(Date.now() - 6 * 60 * 60_000); // 6 hours
+    const abandoned = await this.prisma.paymentInvoice.findMany({
+      where: {
+        status: TransactionStatus.PENDING,
+        createdAt: { lt: cutoff },
+        paymentLinkId: { not: null }, // a merchant link/event registration shell
+        attempts: { none: {} },        // never attempted to pay
+        payout: null,                  // no payout
+        ledgerEntries: { none: {} },   // no money ever touched it
+      },
+      select: { id: true, reference: true, quoteId: true },
+      take: 100,
+    });
+
+    if (!abandoned.length) return;
+    this.logger.log(`Purge: removing ${abandoned.length} abandoned registration shell(s)`);
+
+    for (const inv of abandoned) {
+      try {
+        // The payment request links to the invoice via metadata (not a FK).
+        await this.prisma.paymentRequest.deleteMany({
+          where: { metadata: { path: ['invoiceId'], equals: inv.id } },
+        });
+        await this.prisma.paymentInvoice.delete({ where: { id: inv.id } });
+        // Drop the now-orphan quote if nothing else references it.
+        if (inv.quoteId) {
+          const stillUsed = await this.prisma.paymentInvoice.count({ where: { quoteId: inv.quoteId } });
+          const onTxn = await this.prisma.transaction.count({ where: { quoteId: inv.quoteId } });
+          if (stillUsed === 0 && onTxn === 0) {
+            await this.prisma.quote.delete({ where: { id: inv.quoteId } }).catch(() => undefined);
+          }
+        }
+      } catch (e) {
+        this.logger.warn(`Purge skip ${inv.reference}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
+
+  /**
+   * Finds payins left PROCESSING beyond the live-poll window and resolves them
+   * against the provider's status API. SUCCESS → confirm (credit + payout),
+   * FAILED → fail, still-PENDING-past-expiry → fail. Fully idempotent (confirm/
+   * fail re-check status before writing) so it's safe on every instance.
+   */
+  async reconcileStalePayins(): Promise<void> {
+    const cutoff = new Date(Date.now() - 3 * 60_000); // grace for the live in-memory poll
+    const stale = await this.prisma.paymentInvoice.findMany({
+      where: {
+        status: TransactionStatus.PROCESSING,
+        updatedAt: { lt: cutoff },
+        attempts: { some: { status: TransactionStatus.PROCESSING, externalRef: { not: null } } },
+      },
+      include: {
+        currency: { select: { code: true } },
+        attempts: {
+          where: { status: TransactionStatus.PROCESSING, externalRef: { not: null } },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+      orderBy: { updatedAt: 'asc' },
+      take: 50,
+    });
+
+    if (!stale.length) return;
+    this.logger.log(`Reconcile: checking ${stale.length} stale PROCESSING payin(s)`);
+
+    for (const inv of stale) {
+      const attempt = inv.attempts[0];
+      const ref = attempt?.externalRef;
+      if (!attempt || !ref) continue;
+
+      const job: PayinPollJob = {
+        invoiceId: inv.id,
+        attemptId: attempt.id,
+        externalRef: ref,
+        provider: 'netwalletpay',
+      };
+
+      const status = await this.statusByRef(ref);
+      if (status === 'SUCCESS') {
+        // SAFETY: a recovered success is NEVER auto-paid. It's flagged for an
+        // admin to confirm manually, so no money moves without review.
+        await this.flagRecoverableSuccess(inv, ref);
+      } else if (status === 'FAILED') {
+        this.logger.log(`Reconcile FAILED: ${inv.reference} (${ref})`);
+        await this.failPayin(job, 'Reconciled: provider reports failed');
+      } else if (new Date() > inv.expiresAt) {
+        this.logger.log(`Reconcile EXPIRED→FAILED: ${inv.reference} (${ref})`);
+        await this.failPayin(job, 'Reconciled: expired without confirmation');
+      }
+    }
+  }
+
+  /**
+   * A stuck payin the provider now reports as SUCCESS. We do NOT auto-confirm or
+   * pay — instead we record it once in the admin audit log for manual review.
+   * The invoice stays PROCESSING until an admin approves it.
+   */
+  private async flagRecoverableSuccess(
+    inv: { id: string; reference: string; amount: unknown; expiresAt: Date; currency: { code: string } },
+    ref: string,
+  ): Promise<void> {
+    const already = await this.prisma.adminAuditLog.findFirst({
+      where: { action: 'PAYIN_RECOVERY_FLAGGED', targetId: inv.id },
+      select: { id: true },
+    });
+    if (already) return; // flag only once
+
+    await this.prisma.adminAuditLog.create({
+      data: {
+        adminId: 'SYSTEM',
+        action: 'PAYIN_RECOVERY_FLAGGED',
+        targetType: 'INVOICE',
+        targetId: inv.id,
+        metadata: {
+          reference: inv.reference,
+          externalRef: ref,
+          amount: Number(inv.amount),
+          currency: inv.currency.code,
+          note: 'Provider reports SUCCESS but the invoice is stuck PROCESSING. Needs manual admin confirmation before any payout.',
+        },
+      },
+    });
+    this.logger.warn(
+      `⚠️ Reconcile FLAGGED (no auto-pay): ${inv.reference} (${ref}) — provider=SUCCESS, awaiting admin review`,
+    );
+  }
+
+  /** Resolve a payin's status from the right aggregator by its reference shape. */
+  private async statusByRef(ref: string): Promise<'SUCCESS' | 'FAILED' | 'PENDING'> {
+    try {
+      // ZikoPay references are 'TXN…'; Netwalletpay uses 'DS…'. Unknown refs
+      // (e.g. Lightning) fall through to Netwalletpay, which returns PENDING and
+      // is then only resolved by the expiry rule above.
+      if (ref.toUpperCase().startsWith('TXN')) {
+        return (await this.zikopay.checkTransactionStatus(ref)).status;
+      }
+      return (await this.netwalletpay.checkTransactionStatus(ref)).status;
+    } catch {
+      return 'PENDING';
     }
   }
 

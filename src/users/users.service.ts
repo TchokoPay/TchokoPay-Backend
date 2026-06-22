@@ -510,6 +510,13 @@ export class UsersService {
       return 'PAYER_CONFIRMED';
     }
 
+    // Attempted (or processing) but never confirmed before it expired → this is a
+    // dead transaction (abandoned/failed/lost poll), NOT "pending". Showing it as
+    // EXPIRED keeps stuck PROCESSING invoices from masquerading as in-progress.
+    if (new Date() > invoice.expiresAt) {
+      return 'EXPIRED';
+    }
+
     if (
       latestAttempt?.status === TransactionStatus.PROCESSING ||
       latestAttempt?.status === TransactionStatus.PENDING ||

@@ -121,6 +121,76 @@ export class MerchantCashoutService {
     };
   }
 
+  /**
+   * Per-event breakdown of what makes up the wallet balance. Built from the
+   * ledger so it reconciles exactly: availableBalance = totalSettled − totalWithdrawn.
+   * Each event/link's `net` is the sum of the (post-merchant-fee) amounts it
+   * actually credited to the wallet.
+   */
+  async getBalanceBreakdown(userId: string) {
+    const profile = await this.requireApprovedProfile(userId);
+    const payout = await this.resolveMerchantPayout(profile.id, profile.userId);
+    const currency = payout.country.currency;
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { userId, currencyId: currency.id },
+      select: { id: true, availableBalance: true },
+    });
+
+    const base = {
+      currency: { code: currency.code, symbol: currency.symbol },
+      availableBalance: Number(wallet?.availableBalance ?? 0),
+      totalSettled: 0,
+      totalWithdrawn: 0,
+      events: [] as Array<{ id: string; title: string; kind: string | null; count: number; net: number }>,
+    };
+    if (!wallet) return base;
+
+    const [credits, withdrawnAgg] = await Promise.all([
+      this.prisma.ledger.findMany({
+        where: { walletId: wallet.id, type: LedgerEntryType.CREDIT },
+        select: {
+          amount: true,
+          invoiceId: true,
+          invoice: {
+            select: {
+              paymentLinkId: true,
+              merchantPaymentLink: { select: { title: true, reason: true, kind: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.ledger.aggregate({
+        where: { walletId: wallet.id, type: LedgerEntryType.DEBIT },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    const map = new Map<string, { id: string; title: string; kind: string | null; count: number; net: number }>();
+    let totalSettled = 0;
+    for (const c of credits) {
+      const link = c.invoice?.merchantPaymentLink;
+      const key = c.invoice?.paymentLinkId ?? (c.invoiceId ? 'direct' : 'adjustments');
+      const title =
+        link?.title ||
+        link?.reason ||
+        (key === 'direct' ? 'Direct payments' : key === 'adjustments' ? 'Refunds & adjustments' : 'Untitled');
+      const e = map.get(key) ?? { id: key, title, kind: link?.kind ?? null, count: 0, net: 0 };
+      const amt = Number(c.amount);
+      e.count += 1;
+      e.net += amt;
+      totalSettled += amt;
+      map.set(key, e);
+    }
+
+    return {
+      currency: { code: currency.code, symbol: currency.symbol },
+      availableBalance: Number(wallet.availableBalance),
+      totalSettled: Math.round(totalSettled),
+      totalWithdrawn: Math.round(Number(withdrawnAgg._sum.amount ?? 0)),
+      events: [...map.values()].map((e) => ({ ...e, net: Math.round(e.net) })).sort((a, b) => b.net - a.net),
+    };
+  }
+
   async requestCashout(userId: string, amount: number) {
     const profile = await this.requireApprovedProfile(userId);
     if (!(amount > 0)) throw new BadRequestException('Enter an amount greater than zero');

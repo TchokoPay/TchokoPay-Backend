@@ -67,6 +67,12 @@ export class MerchantController {
     return this.cashouts.quoteCashout(req.user.userId);
   }
 
+  @Get('cashout/breakdown')
+  @ApiOperation({ summary: 'Per-event breakdown of what makes up the wallet balance' })
+  balanceBreakdown(@Req() req: AuthRequest) {
+    return this.cashouts.getBalanceBreakdown(req.user.userId);
+  }
+
   @Post('cashout')
   @ApiOperation({ summary: 'Request a cash-out of held wallet funds (admin-approved)' })
   requestCashout(@Req() req: AuthRequest, @Body() body: { amount: number }) {
