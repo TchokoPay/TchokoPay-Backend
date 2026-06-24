@@ -15,6 +15,7 @@ import { MerchantCashoutService } from './merchant-cashout.service.js';
 import { ApplyMerchantDto } from './dto/apply-merchant.dto.js';
 import { CreatePaymentLinkDto } from './dto/create-payment-link.dto.js';
 import { CreateEventDto } from './dto/create-event.dto.js';
+import { UpdateEventDto } from './dto/update-event.dto.js';
 
 interface AuthRequest extends Request {
   user: {
@@ -151,6 +152,12 @@ export class MerchantController {
   @ApiOperation({ summary: 'Create an event' })
   createEvent(@Req() req: AuthRequest, @Body() dto: CreateEventDto) {
     return this.paymentLinks.createEvent(req.user.userId, dto);
+  }
+
+  @Patch('events/:id')
+  @ApiOperation({ summary: 'Update an event (name, title, price, images, description, end date)' })
+  updateEvent(@Req() req: AuthRequest, @Param('id') id: string, @Body() dto: UpdateEventDto) {
+    return this.paymentLinks.updateEvent(req.user.userId, id, dto);
   }
 
   @Get('events/:id/payments')

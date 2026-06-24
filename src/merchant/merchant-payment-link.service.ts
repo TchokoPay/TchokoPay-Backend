@@ -13,6 +13,7 @@ import { UserSettingsService } from '../users/services/user-settings.service.js'
 import { PaymentMethodEnum, FlowEnum } from '../quote/dto/create-quote.dto.js';
 import { CreatePaymentLinkDto } from './dto/create-payment-link.dto.js';
 import { CreateEventDto } from './dto/create-event.dto.js';
+import { UpdateEventDto } from './dto/update-event.dto.js';
 import cloudinary from '../config/cloudinary.config.js';
 
 const SLUG_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -232,6 +233,46 @@ export class MerchantPaymentLinkService {
       select: LINK_SELECT,
     });
 
+    return this.shape(link);
+  }
+
+  /**
+   * Update an EVENT's details. Every field is optional. The slug (public URL)
+   * is intentionally NEVER changed so shared links/QRs keep working, and price
+   * changes only affect FUTURE registrations — already-settled payments are
+   * untouched (we don't rewrite any existing invoice).
+   */
+  async updateEvent(userId: string, eventId: string, dto: UpdateEventDto) {
+    const profile = await this.requireApprovedProfile(userId);
+    const existing = await this.prisma.merchantPaymentLink.findFirst({
+      where: { id: eventId, merchantProfileId: profile.id, kind: 'EVENT' },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Event not found');
+
+    const data: Prisma.MerchantPaymentLinkUpdateInput = {};
+    if (dto.title !== undefined) data.title = dto.title;
+    if (dto.eventType !== undefined) data.eventType = dto.eventType;
+    if (dto.collectLabel !== undefined) data.reason = dto.collectLabel;
+    if (dto.description !== undefined) data.description = dto.description?.trim() || null;
+    if (dto.coverImageUrl !== undefined) data.coverImageUrl = dto.coverImageUrl || null;
+    if (dto.logoUrl !== undefined) data.logoUrl = dto.logoUrl || null;
+    if (dto.baseAmount !== undefined) data.baseAmount = new Prisma.Decimal(dto.baseAmount);
+    if (dto.baseCurrency !== undefined) {
+      const currency = await this.prisma.currency.findUnique({ where: { code: dto.baseCurrency } });
+      if (!currency || !currency.isActive) throw new BadRequestException('Unsupported base currency');
+      data.baseCurrency = { connect: { id: currency.id } };
+    }
+    if (dto.durationDays !== undefined) {
+      // Re-sets the registration window from now (lets a merchant extend an event).
+      data.expiresAt = new Date(Date.now() + dto.durationDays * 24 * 60 * 60 * 1000);
+    }
+
+    const link = await this.prisma.merchantPaymentLink.update({
+      where: { id: eventId },
+      data,
+      select: LINK_SELECT,
+    });
     return this.shape(link);
   }
 
