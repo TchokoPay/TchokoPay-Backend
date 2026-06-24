@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { NetwalletpayProvider } from '../payment/providers/netwalletpay.provider.js';
 import { ZikoPayProvider } from '../payment/providers/zikopay.provider.js';
 import { UserStatusCacheService } from '../redis/user-status-cache.service.js';
+import { getXafRates, toXaf } from '../common/fx-convert.js';
 
 type AdminActionTarget = 'USER' | 'INVOICE' | 'KYC' | 'PRICING' | 'SYSTEM' | 'REFUND' | 'WITHDRAWAL' | 'MERCHANT';
 
@@ -962,20 +963,28 @@ export class AdminService {
         }),
       ]);
 
-    // ── All-time analysis (settlement currency = the merchant's wallet currency) ──
-    const settlementCurrency =
-      wallets[0]?.currency.code ?? recent[0]?.currency.code ?? 'XAF';
+    // ── All-time analysis. Payments settle in the payer's currency, so totals
+    // are converted to an APPROXIMATE single XAF figure for display (the per-
+    // currency reality lives in the wallet cards / transaction rows). ──
+    const fxRates = await getXafRates();
+    const settlementCurrency = 'XAF';
+    const approx = successLite.some((i) => i.currency.code !== 'XAF');
     let volume = 0;
-    let earnings = 0;          // platform's merchant-fee take (settlement currency)
-    let platformFees = 0;      // payer-side platform fee (quote.fee, payer currency)
+    let earnings = 0;          // platform's merchant-fee take
+    let platformFees = 0;      // payer-side platform fee (quote.fee)
     const payers = new Set<string>();
     for (const inv of successLite) {
+      const code = inv.currency.code;
       const s = Number(inv.amount);
-      volume += s;
-      earnings += Math.round((s * feePercentFor(inv.quote?.baseCurrency?.code ?? null, inv.paymentMethod)) / 100);
-      if (inv.quote?.fee != null) platformFees += Number(inv.quote.fee);
+      volume += toXaf(s, code, fxRates);
+      const fee = (s * feePercentFor(inv.quote?.baseCurrency?.code ?? null, inv.paymentMethod)) / 100;
+      earnings += toXaf(fee, code, fxRates);
+      if (inv.quote?.fee != null) platformFees += toXaf(Number(inv.quote.fee), inv.quote.baseCurrency?.code ?? code, fxRates);
       if (inv.createdById) payers.add(inv.createdById);
     }
+    volume = Math.round(volume);
+    earnings = Math.round(earnings);
+    platformFees = Math.round(platformFees);
     const counts = Object.fromEntries(statusGroups.map((g) => [g.status, g._count._all]));
 
     // ── Recent transactions with per-tx profit ──
@@ -1024,6 +1033,7 @@ export class AdminService {
         .filter((w) => w.availableBalance > 0),
       analysis: {
         settlementCurrency,
+        approx,              // true when totals are XAF-converted from other currencies
         volume,
         earnings,            // platform earnings from merchant fees (settlement currency)
         platformFees,        // payer-side platform fees collected (payer currency, may be mixed)
@@ -1118,11 +1128,16 @@ export class AdminService {
     const countryMap = new Map<string, { count: number; volume: number }>();
     const corridorMap = new Map<string, { count: number; volume: number }>();
 
+    // Volumes are converted to an approximate XAF figure since payments settle
+    // in many currencies (display-only single total).
+    const fxRates = await getXafRates();
+
     for (const inv of invoices) {
       const day = inv.createdAt.toISOString().slice(0, 10);
       const row = txMap.get(day) ?? { success: 0, failed: 0, total: 0, volume: 0, fees: 0 };
-      const amount = Number(inv.quote?.baseAmount ?? inv.amount);
-      const fee = Number(inv.quote?.fee ?? 0);
+      const ccy = inv.quote?.baseCurrency?.code ?? 'XAF';
+      const amount = toXaf(Number(inv.quote?.baseAmount ?? inv.amount), ccy, fxRates);
+      const fee = toXaf(Number(inv.quote?.fee ?? 0), ccy, fxRates);
 
       row.total++;
       row.volume += amount;

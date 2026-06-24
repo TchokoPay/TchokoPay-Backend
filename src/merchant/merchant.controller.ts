@@ -54,6 +54,12 @@ export class MerchantController {
     return this.merchant.getAnalytics(req.user.userId, period);
   }
 
+  @Get('revenue')
+  @ApiOperation({ summary: 'Lifetime revenue summed to an approximate XAF total + per-currency split' })
+  getRevenue(@Req() req: AuthRequest) {
+    return this.merchant.getRevenueXaf(req.user.userId);
+  }
+
   @Get('wallet')
   @ApiOperation({ summary: 'Get my merchant wallet balance (held funds for cash-out)' })
   getWallet(@Req() req: AuthRequest) {
@@ -61,6 +67,12 @@ export class MerchantController {
   }
 
   // ── Cash-out ───────────────────────────────────────────────────────────────
+
+  @Get('wallets')
+  @ApiOperation({ summary: 'All wallet balances per currency (cards) + withdrawal availability' })
+  getWallets(@Req() req: AuthRequest) {
+    return this.cashouts.getWallets(req.user.userId);
+  }
 
   @Get('cashout/quote')
   @ApiOperation({ summary: 'Available balance + withdrawal fee + payout destination' })
@@ -75,9 +87,17 @@ export class MerchantController {
   }
 
   @Post('cashout')
-  @ApiOperation({ summary: 'Request a cash-out of held wallet funds (admin-approved)' })
-  requestCashout(@Req() req: AuthRequest, @Body() body: { amount: number }) {
-    return this.cashouts.requestCashout(req.user.userId, Number(body?.amount));
+  @ApiOperation({ summary: 'Request a per-currency withdrawal via Mobile Money or Bank (admin-approved)' })
+  requestCashout(
+    @Req() req: AuthRequest,
+    @Body() body: { currencyCode: string; amount: number; method?: string; bankDetails?: Record<string, unknown> },
+  ) {
+    return this.cashouts.requestCashout(req.user.userId, {
+      currencyCode: String(body?.currencyCode ?? ''),
+      amount: Number(body?.amount),
+      method: body?.method,
+      bankDetails: body?.bankDetails,
+    });
   }
 
   @Get('cashouts')

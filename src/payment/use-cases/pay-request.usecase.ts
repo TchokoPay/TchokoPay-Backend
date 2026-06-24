@@ -97,17 +97,22 @@ export class PayRequestUseCase {
     }
 
     const link = invoice.merchantPaymentLink;
-    const isUsdEvent = link?.baseCurrency?.code === 'USD';
 
     let quote: QuoteWithCurrencies;
     let lockedSettlement: number | null = null;
+    let settlementCurrencyId: string | null = null;
 
-    if (isUsdEvent && link) {
-      // Lock the clean USD → settlement-currency (e.g. XAF) rate NOW — this is
-      // the merchant's settlement amount, with no platform spread/fee.
+    if (link) {
+      // Merchant event/link: the MERCHANT is settled in the PAYER's currency,
+      // net of fees — no conversion to a fixed wallet currency. Two quotes are
+      // locked at this instant: the payer leg (their currency → event base, with
+      // our spread/fee) and the clean settlement (event base → payer currency).
+      const baseCcy = link.baseCurrency.code;
+      const isUsd = baseCcy === 'USD';
+
       const settlementQuote = (await this.quoteService.create({
-        baseCurrency: link.baseCurrency.code, // USD
-        targetCurrency: invoice.currency.code, // settlement, e.g. XAF
+        baseCurrency: baseCcy,            // event base, e.g. USD / XAF
+        targetCurrency: dto.baseCurrency, // the payer's currency
         amount: Number(link.baseAmount),
         amountType: 'PAY' as any,
         cleanRate: true,
@@ -116,15 +121,14 @@ export class PayRequestUseCase {
         flow: 'REQUEST' as any,
       })) as QuoteWithCurrencies;
       lockedSettlement = Number(settlementQuote.targetAmount);
+      settlementCurrencyId = settlementQuote.targetCurrencyId;
 
-      // Payer leg: the payer's currency → USD (the event price) with the USD
-      // 10%/5% rule. XAF never appears on the payer's side.
       quote = (await this.quoteService.create({
-        baseCurrency: dto.baseCurrency, // payer currency, e.g. KES
-        targetCurrency: link.baseCurrency.code, // USD
+        baseCurrency: dto.baseCurrency,   // payer currency
+        targetCurrency: baseCcy,          // event base
         amount: Number(link.baseAmount),
         amountType: 'RECEIVE' as any,
-        pricingBaseCurrency: 'USD',
+        pricingBaseCurrency: isUsd ? 'USD' : undefined,
         paymentMethod,
         payoutMethod: invoice.payoutMethod,
         flow: 'REQUEST' as any,
@@ -147,9 +151,10 @@ export class PayRequestUseCase {
         quote: { connect: { id: quote.id } },
         paymentMethod,
         status: TransactionStatus.PROCESSING,
-        // USD events: lock the merchant's settlement amount (settlement currency)
-        // computed at this instant, decoupled from the payer's payment currency.
+        // Merchant payments settle in the payer's currency: re-point the invoice
+        // amount AND currency to the locked settlement computed now.
         ...(lockedSettlement != null ? { amount: new Prisma.Decimal(lockedSettlement) } : {}),
+        ...(settlementCurrencyId ? { currency: { connect: { id: settlementCurrencyId } } } : {}),
         createdBy: isGuest
           ? { disconnect: true }
           : { connect: { id: userId } },

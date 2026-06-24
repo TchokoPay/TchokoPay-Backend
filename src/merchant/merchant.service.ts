@@ -3,6 +3,7 @@ import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/com
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { UserSettingsService } from '../users/services/user-settings.service.js';
 import { ApplyMerchantDto } from './dto/apply-merchant.dto.js';
+import { getXafRates, toXaf } from '../common/fx-convert.js';
 
 type AnalyticsPeriod = '7d' | '30d' | '90d';
 
@@ -199,6 +200,39 @@ export class MerchantService {
   }
 
   /**
+   * Lifetime revenue across ALL currencies, summed to one APPROXIMATE XAF figure
+   * for the dashboard headline (payments settle in the payer's currency). The
+   * per-currency split is returned too.
+   */
+  async getRevenueXaf(userId: string) {
+    const profile = await this.prisma.merchantProfile.findUnique({ where: { userId }, select: { id: true } });
+    if (!profile) return { xafTotal: 0, approx: false, byCurrency: [] as Array<{ currency: string; amount: number; count: number }> };
+
+    const grouped = await this.prisma.paymentInvoice.groupBy({
+      by: ['currencyId'],
+      where: { merchantProfileId: profile.id, status: 'SUCCESS' },
+      _sum: { amount: true },
+      _count: { _all: true },
+    });
+    const currencies = await this.prisma.currency.findMany({
+      where: { id: { in: grouped.map((g) => g.currencyId) } },
+      select: { id: true, code: true },
+    });
+    const codeById = Object.fromEntries(currencies.map((c) => [c.id, c.code]));
+    const rates = await getXafRates();
+
+    let xafTotal = 0;
+    const byCurrency = grouped.map((g) => {
+      const currency = codeById[g.currencyId] ?? 'XAF';
+      const amount = Number(g._sum.amount ?? 0);
+      xafTotal += toXaf(amount, currency, rates);
+      return { currency, amount: Math.round(amount), count: g._count._all };
+    }).sort((a, b) => b.amount - a.amount);
+
+    return { xafTotal: Math.round(xafTotal), approx: byCurrency.some((b) => b.currency !== 'XAF'), byCurrency };
+  }
+
+  /**
    * Scoped analytics over the payments this merchant has received
    * (PaymentInvoice rows where they are the recipient), mirroring
    * AdminService.getAnalytics() but filtered to a single user.
@@ -257,14 +291,16 @@ export class MerchantService {
     const corridorMap = new Map<string, { count: number; volume: number }>();
     const payerIds = new Set<string>();
 
+    // Payments settle in the payer's currency — convert each to an approximate
+    // XAF figure so the single volume total is meaningful (display-only).
+    const fxRates = await getXafRates();
+
     for (const inv of invoices) {
       const day = inv.createdAt.toISOString().slice(0, 10);
       const row = txMap.get(day) ?? { success: 0, failed: 0, total: 0, volume: 0, fees: 0 };
-      // Use the settlement amount (merchant's currency) so volume is consistent
-      // with the wallet/revenue. quote.baseAmount is the payer's currency and
-      // would mix currencies (e.g. USD-priced events paid in KES/XAF).
-      const amount = Number(inv.amount);
-      const fee = Number(inv.quote?.fee ?? 0);
+      const ccy = inv.currency?.code ?? 'XAF';
+      const amount = toXaf(Number(inv.amount), ccy, fxRates);
+      const fee = toXaf(Number(inv.quote?.fee ?? 0), inv.quote?.baseCurrency?.code ?? ccy, fxRates);
 
       row.total++;
       row.volume += amount;
@@ -311,6 +347,9 @@ export class MerchantService {
 
     return {
       period,
+      // Volumes are summed to an approximate XAF figure across currencies.
+      currency: 'XAF',
+      approx: invoices.some((inv) => (inv.currency?.code ?? 'XAF') !== 'XAF'),
       summary: {
         totalVolume: Math.round(totalVolume),
         totalFees: Math.round(totalFees),

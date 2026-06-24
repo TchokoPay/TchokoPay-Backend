@@ -262,6 +262,10 @@ model MerchantProfile {
   // Cash-out (withdrawal) requests from the merchant wallet.
   cashouts        MerchantCashout[] @relation("MerchantCashouts")
 
+  // Saved, reusable bank account for Bank withdrawals (manual payout).
+  // Shape: { accountName, accountNumber, bankName, country, swiftIban }
+  bankDetails     Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1152,10 +1156,13 @@ model MerchantCashout {
   currency   Currency @relation("CashoutCurrency", fields: [currencyId], references: [id])
 
   // Snapshot of the payout destination at request time.
+  // payoutMethod is "MOMO" or "BANK".
   payoutPhone        String?
   payoutMethod       String?
   payoutProviderCode String?
   country            String?
+  // For BANK withdrawals: snapshot of the bank account details used.
+  bankDetails        Json?
 
   status CashoutStatus @default(PENDING)
 

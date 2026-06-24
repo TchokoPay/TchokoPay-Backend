@@ -22,6 +22,7 @@ const CASHOUT_SELECT = {
   payoutPhone: true,
   payoutMethod: true,
   country: true,
+  bankDetails: true,
   externalRef: true,
   rejectionReason: true,
   createdAt: true,
@@ -122,6 +123,58 @@ export class MerchantCashoutService {
   }
 
   /**
+   * All wallet balances (one card per currency). Mobile-money withdrawal is only
+   * available for the currency of the merchant's saved payout number; every
+   * other currency must be withdrawn via Bank.
+   */
+  async getWallets(userId: string) {
+    const profile = await this.requireApprovedProfile(userId);
+
+    let momoCurrencyCode: string | null = null;
+    let payoutTo: string | null = null;
+    try {
+      const payout = await this.resolveMerchantPayout(profile.id, profile.userId);
+      momoCurrencyCode = payout.country.currency.code;
+      payoutTo = `${payout.provider.name} · ${payout.phone}`;
+    } catch {
+      /* no verified payout number yet — MoMo simply won't be offered */
+    }
+
+    const [wallets, pending, savedBank] = await Promise.all([
+      this.prisma.wallet.findMany({
+        where: { userId },
+        select: { availableBalance: true, currency: { select: { code: true, symbol: true, name: true } } },
+        orderBy: { availableBalance: 'desc' },
+      }),
+      this.prisma.merchantCashout.findMany({
+        where: { userId, status: 'PENDING' },
+        select: { currency: { select: { code: true } } },
+      }),
+      this.prisma.merchantProfile.findUnique({ where: { id: profile.id }, select: { bankDetails: true } }),
+    ]);
+
+    const pendingCurrencies = new Set(pending.map((p) => p.currency.code));
+    const min = await this.minWithdrawal();
+
+    return {
+      momoCurrencyCode,
+      payoutTo,
+      minAmount: min,
+      savedBank: savedBank?.bankDetails ?? null,
+      wallets: wallets
+        .map((w) => ({
+          currency: w.currency.code,
+          symbol: w.currency.symbol,
+          name: w.currency.name,
+          availableBalance: Number(w.availableBalance),
+          momoAvailable: !!momoCurrencyCode && w.currency.code === momoCurrencyCode,
+          hasPending: pendingCurrencies.has(w.currency.code),
+        }))
+        .filter((w) => w.availableBalance > 0),
+    };
+  }
+
+  /**
    * Per-event breakdown of what makes up the wallet balance. Built from the
    * ledger so it reconciles exactly: availableBalance = totalSettled − totalWithdrawn.
    * Each event/link's `net` is the sum of the (post-merchant-fee) amounts it
@@ -191,36 +244,79 @@ export class MerchantCashoutService {
     };
   }
 
-  async requestCashout(userId: string, amount: number) {
-    const profile = await this.requireApprovedProfile(userId);
-    if (!(amount > 0)) throw new BadRequestException('Enter an amount greater than zero');
+  private validateBankDetails(b: Record<string, unknown> | undefined) {
+    const s = (v: unknown) => (v ?? '').toString().trim();
+    const accountName = s(b?.accountName);
+    const accountNumber = s(b?.accountNumber);
+    const bankName = s(b?.bankName);
+    const country = s(b?.country).toUpperCase();
+    const swiftIban = s(b?.swiftIban);
+    if (!accountName || !accountNumber || !bankName || !country) {
+      throw new BadRequestException('Account holder name, account number, bank name and country are required');
+    }
+    return { accountName, accountNumber, bankName, country, ...(swiftIban ? { swiftIban } : {}) };
+  }
 
-    const payout = await this.resolveMerchantPayout(profile.id, profile.userId);
-    const currency = payout.country.currency;
+  /**
+   * Request a withdrawal of a specific currency balance.
+   * - method MOMO: only when the currency matches the saved payout number's
+   *   currency; goes out via the provider on approval.
+   * - method BANK: any currency; bank details are saved + snapshotted; the admin
+   *   sends it manually (3–5 business days).
+   */
+  async requestCashout(
+    userId: string,
+    dto: { currencyCode: string; amount: number; method?: string; bankDetails?: Record<string, unknown> },
+  ) {
+    const profile = await this.requireApprovedProfile(userId);
+    const amount = Number(dto.amount);
+    const method = (dto.method || 'MOMO').toUpperCase();
+    if (!(amount > 0)) throw new BadRequestException('Enter an amount greater than zero');
+    if (!dto.currencyCode) throw new BadRequestException('Currency is required');
+
+    const currency = await this.prisma.currency.findUnique({ where: { code: dto.currencyCode.toUpperCase() } });
+    if (!currency) throw new BadRequestException('Unknown currency');
 
     const min = await this.minWithdrawal();
-    if (amount < min) {
-      throw new BadRequestException(`Minimum withdrawal is ${min} ${currency.code}`);
-    }
+    if (amount < min) throw new BadRequestException(`Minimum withdrawal is ${min} ${currency.code}`);
 
-    // One pending withdrawal at a time — keeps reserved balances clear.
+    // One pending withdrawal per currency.
     const existingPending = await this.prisma.merchantCashout.findFirst({
-      where: { userId, status: 'PENDING' },
+      where: { userId, status: 'PENDING', currencyId: currency.id },
       select: { id: true },
     });
     if (existingPending) {
-      throw new BadRequestException('You already have a withdrawal awaiting approval. Please wait for it to be processed.');
+      throw new BadRequestException(`You already have a pending ${currency.code} withdrawal. Please wait for it to be processed.`);
     }
 
     const wallet = await this.prisma.wallet.findFirst({ where: { userId, currencyId: currency.id } });
     const available = Number(wallet?.availableBalance ?? 0);
     if (!wallet || available < amount) throw new BadRequestException('Insufficient available balance');
 
-    // Fee is already applied at settlement, so the wallet balance is net —
-    // a cash-out withdraws the full requested amount with no further fee.
-    const fee = 0;
-    const netAmount = amount;
+    // Build the payout destination snapshot for the chosen method.
+    let snapshot: {
+      payoutPhone: string | null; payoutMethod: string; payoutProviderCode: string | null;
+      country: string | null; bankDetails?: Record<string, unknown>;
+    };
+    if (method === 'BANK') {
+      const bank = this.validateBankDetails(dto.bankDetails);
+      // Save / refresh the reusable bank account on the merchant profile.
+      await this.prisma.merchantProfile.update({ where: { id: profile.id }, data: { bankDetails: bank } });
+      snapshot = { payoutPhone: null, payoutMethod: 'BANK', payoutProviderCode: null, country: bank.country, bankDetails: bank };
+    } else {
+      const payout = await this.resolveMerchantPayout(profile.id, profile.userId);
+      if (payout.country.currency.code !== currency.code) {
+        throw new BadRequestException(`Mobile Money isn't available for ${currency.code}. Withdraw it via Bank, or cash out your ${payout.country.currency.code} balance via Mobile Money.`);
+      }
+      snapshot = {
+        payoutPhone: payout.phone,
+        payoutMethod: payout.paymentMethod, // MOMO / ORANGE …
+        payoutProviderCode: payout.provider.providerCode,
+        country: payout.country.iso2,
+      };
+    }
 
+    const fee = 0; // fee already taken at settlement — wallet balance is net
     const amountDec = new Prisma.Decimal(amount);
     // Reserve the funds immediately so they can't be double-withdrawn.
     await this.creditWallet(userId, currency.id, amountDec, LedgerEntryType.DEBIT);
@@ -233,16 +329,17 @@ export class MerchantCashoutService {
         userId,
         amount: amountDec,
         fee: new Prisma.Decimal(fee),
-        netAmount: new Prisma.Decimal(netAmount),
+        netAmount: amountDec,
         currency: { connect: { id: currency.id } },
-        payoutPhone: payout.phone,
-        payoutMethod: payout.paymentMethod,
-        payoutProviderCode: payout.provider.providerCode,
-        country: payout.country.iso2,
+        payoutPhone: snapshot.payoutPhone,
+        payoutMethod: snapshot.payoutMethod,
+        payoutProviderCode: snapshot.payoutProviderCode,
+        country: snapshot.country,
+        ...(snapshot.bankDetails ? { bankDetails: snapshot.bankDetails as Prisma.InputJsonValue } : {}),
       },
       select: CASHOUT_SELECT,
     });
-    this.logger.log(`💸 Cashout requested ${reference}: ${amount} ${currency.code} (fee ${fee})`);
+    this.logger.log(`💸 Cashout requested ${reference}: ${amount} ${currency.code} via ${method}`);
     return cashout;
   }
 
@@ -302,6 +399,18 @@ export class MerchantCashoutService {
     });
     if (!cashout) throw new NotFoundException('Cashout not found');
     if (cashout.status !== 'PENDING') throw new BadRequestException('This cashout is already processed');
+
+    // BANK withdrawals have no automated rail — the admin sends them externally,
+    // so approving simply marks it PAID (the merchant was told 3–5 business days).
+    if (cashout.payoutMethod === 'BANK') {
+      void this.notifyMerchant(cashout.userId, cashout.reference, Number(cashout.netAmount), cashout.currency.code, 'bank transfer', 'PAID');
+      this.logger.log(`🏦 Bank cashout ${cashout.reference} approved (manual send)`);
+      return this.prisma.merchantCashout.update({
+        where: { id },
+        data: { status: 'PAID', reviewedById: adminId, reviewedAt: new Date() },
+        select: CASHOUT_SELECT,
+      });
+    }
 
     let response: { status?: string; transactionId?: string; error?: string } | null = null;
     try {
