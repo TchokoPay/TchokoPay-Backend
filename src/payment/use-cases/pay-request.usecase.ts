@@ -33,6 +33,7 @@ export class PayRequestUseCase {
         recipient: true,
         currency: true,
         merchantPaymentLink: { include: { baseCurrency: true } },
+        merchantProfile: { select: { businessName: true } },
       },
     });
 
